@@ -343,7 +343,7 @@ def ensure_base(store, model, ref):
             "artifact": str(ref.path),
             "adapter": None,
             "kind": "base"
-            if ref.upstream == "vllm"
+            if ref.upstream in {"vllm", "sglang"}
             else "gguf-full"
             if ref.format == "gguf"
             else "mlx-fused",

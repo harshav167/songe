@@ -33,6 +33,10 @@ def create(config, root):
         )
         upstream.supervisor = supervisor
         return upstream
+    if config.upstream == "sglang":
+        from .sglang import SGLang
+
+        return SGLang(config)
     if config.upstream == "vllm":
         from .vllm import VLLM
 

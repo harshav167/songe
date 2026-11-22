@@ -58,7 +58,8 @@ def parser():
     init.add_argument("--yes", action="store_true", help="Accept without asking")
     init.add_argument("--model", type=Path, help="Model folder or file to start with")
     init.add_argument(
-        "--upstream", choices=("lmstudio", "mlx", "ollama", "llamacpp", "vllm")
+        "--upstream",
+        choices=("lmstudio", "mlx", "ollama", "llamacpp", "vllm", "sglang"),
     )
     init.add_argument("--name")
     init.add_argument("--upstream-url")
@@ -251,6 +252,7 @@ def initialize(args, root):
         "llamacpp": "http://127.0.0.1:8080/v1",
         "mlx": "http://127.0.0.1:1235/v1",
         "vllm": "http://127.0.0.1:8000/v1",
+        "sglang": "http://127.0.0.1:30000/v1",
     }
     requested = args.upstream or (config.upstream if config.model else None)
     folder = discovery.lmstudio_downloads()
@@ -580,6 +582,7 @@ def initialize(args, root):
         "llamacpp": "llama.cpp",
         "mlx": "mlx-lm",
         "vllm": "vLLM",
+        "sglang": "SGLang",
     }
     server = labels.get(config.upstream, config.upstream)
     from .models.names import exposed
@@ -684,7 +687,7 @@ def initialize(args, root):
                 "artifact": str(ref.path),
                 "adapter": None,
                 "kind": "base"
-                if config.upstream == "vllm"
+                if config.upstream in {"vllm", "sglang"}
                 else ("gguf-full" if ref.format == "gguf" else "mlx-fused"),
                 "created": time.time(),
                 "night": 0,
