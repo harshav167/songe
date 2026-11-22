@@ -259,9 +259,16 @@ class Config:
             "::1",
         }:
             raise ValueError("Songe upstream must be a local HTTP endpoint")
-        if self.upstream not in {"lmstudio", "mlx", "ollama", "llamacpp", "vllm"}:
+        if self.upstream not in {
+            "lmstudio",
+            "mlx",
+            "ollama",
+            "llamacpp",
+            "vllm",
+            "sglang",
+        }:
             raise ValueError(
-                "Supported upstreams: lmstudio, mlx, ollama, llamacpp, vllm"
+                "Supported upstreams: lmstudio, mlx, ollama, llamacpp, vllm, sglang"
             )
         if self.backend not in {"auto", "mlx", "torch"}:
             raise ValueError("Supported backends: auto, mlx, torch")

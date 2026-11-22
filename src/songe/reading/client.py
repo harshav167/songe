@@ -62,7 +62,7 @@ class Reader:
         self.store, self.url, self.model = store, url.rstrip("/"), model
         # vLLM passes thinking on or off to the chat template, which reads
         # enable_thinking (Qwen, Granite); reasoning_effort is not used there.
-        self.template_switch = server == "vllm"
+        self.template_switch = server in {"vllm", "sglang"}
         self.still_idle = still_idle
         # Which questions the model thinks about first: slower, steadier.
         # Measured on the answer key: thinking helps classify only.

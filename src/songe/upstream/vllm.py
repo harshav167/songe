@@ -18,6 +18,10 @@ from .protection import (
 class VLLM:
     name = "vllm"
     serves = ("peft-adapter",)
+    admin_prefix = "/v1"
+
+    def admin_headers(self):
+        return {}
 
     def __init__(self, config, *, transport=None, memory_probe=None):
         self.config, self.transport = config, transport
@@ -77,7 +81,7 @@ class VLLM:
             or Path(existing.get("root", "")).resolve() != adapter
         ):
             raise RuntimeError(
-                f"vLLM identifier {version['identifier']} already refers to other weights"
+                f"{self.name} identifier {version['identifier']} already refers to other weights"
             )
         return True
 
@@ -107,7 +111,8 @@ class VLLM:
         claim(self, version)
         await self._request(
             "POST",
-            "/v1/load_lora_adapter",
+            self.admin_prefix + "/load_lora_adapter",
+            headers=self.admin_headers(),
             json={
                 "lora_name": version["identifier"],
                 "lora_path": adapter,
@@ -132,7 +137,8 @@ class VLLM:
         if still_owned:
             await self._request(
                 "POST",
-                "/v1/unload_lora_adapter",
+                self.admin_prefix + "/unload_lora_adapter",
+                headers=self.admin_headers(),
                 json={"lora_name": version["identifier"]},
             )
         self.owned.pop(version["identifier"], None)

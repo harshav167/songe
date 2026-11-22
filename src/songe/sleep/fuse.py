@@ -112,6 +112,7 @@ def candidate_kind(config, platform):
         "ollama": "gguf-full",
         "llamacpp": "gguf-lora",
         "vllm": "peft-adapter",
+        "sglang": "peft-adapter",
     }[config.upstream]
 
 

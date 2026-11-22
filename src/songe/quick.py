@@ -663,7 +663,7 @@ async def compare(client, url, model, request, before_block, after_block, *, ser
         body = {k: v for k, v in request.items() if k not in dropped}
         body["messages"] = with_lessons(request["messages"], block) if block else request["messages"]
         body.update(model=model, temperature=0, max_tokens=ANSWER_TOKENS, stream=False)
-        if server == "vllm":
+        if server in {"vllm", "sglang"}:
             body["chat_template_kwargs"] = {"enable_thinking": False}
         r = await client.post(url.rstrip("/") + "/chat/completions", json=body)
         r.raise_for_status()
@@ -782,7 +782,7 @@ async def judge(client, url, model, lesson, before, after, *, server=""):
             "type": "object", "properties": {"follows": {"type": "string", "enum": ["A", "B", "both", "neither"]}},
             "required": ["follows"]}}},
     }
-    if server == "vllm":
+    if server in {"vllm", "sglang"}:
         body["chat_template_kwargs"] = {"enable_thinking": False}
     try:
         r = await client.post(url.rstrip("/") + "/chat/completions", json=body)

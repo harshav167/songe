@@ -319,6 +319,10 @@ def _openai_ref(item, upstream):
     )
 
 
+def sglang(url, transport=None):
+    return openai_models(url, "sglang", transport)
+
+
 def vllm(url, transport=None):
     return openai_models(url, "vllm", transport)
 

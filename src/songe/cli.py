@@ -58,7 +58,8 @@ def parser():
     init.add_argument("--yes", action="store_true", help="Accept without asking")
     init.add_argument("--model", type=Path, help="Model folder or file to start with")
     init.add_argument(
-        "--upstream", choices=("lmstudio", "mlx", "ollama", "llamacpp", "vllm")
+        "--upstream",
+        choices=("lmstudio", "mlx", "ollama", "llamacpp", "vllm", "sglang"),
     )
     init.add_argument("--name")
     init.add_argument("--upstream-url")
@@ -77,10 +78,18 @@ def parser():
     undo = commands.add_parser("undo", help="Return a model to its previous version")
     undo.add_argument("model", nargs="?")
     undo.add_argument("--version")
-    commands.add_parser("status", help="What Songe is doing")
-    models = commands.add_parser(
-        "models", help="List models · auto-dream on|off"
+    seed = commands.add_parser(
+        "omp-backfill", help="Preview or import saved OMP turns for one model"
     )
+    seed.add_argument("sessions", type=Path)
+    seed.add_argument("--provider", required=True, help="Exact historical OMP provider")
+    seed.add_argument("--model", required=True, help="Exact historical OMP model ID")
+    seed.add_argument("--target", required=True, help="Matching Songe primary base ID")
+    seed.add_argument(
+        "--apply", action="store_true", help="Write matches (default is preview only)"
+    )
+    commands.add_parser("status", help="What Songe is doing")
+    models = commands.add_parser("models", help="List models · auto-dream on|off")
     models.add_argument("model", nargs="?")
     models.add_argument("level", nargs="?", choices=("on", "off"))
     for name, text in (
@@ -251,6 +260,7 @@ def initialize(args, root):
         "llamacpp": "http://127.0.0.1:8080/v1",
         "mlx": "http://127.0.0.1:1235/v1",
         "vllm": "http://127.0.0.1:8000/v1",
+        "sglang": "http://127.0.0.1:30000/v1",
     }
     requested = args.upstream or (config.upstream if config.model else None)
     folder = discovery.lmstudio_downloads()
@@ -580,6 +590,7 @@ def initialize(args, root):
         "llamacpp": "llama.cpp",
         "mlx": "mlx-lm",
         "vllm": "vLLM",
+        "sglang": "SGLang",
     }
     server = labels.get(config.upstream, config.upstream)
     from .models.names import exposed
@@ -684,7 +695,7 @@ def initialize(args, root):
                 "artifact": str(ref.path),
                 "adapter": None,
                 "kind": "base"
-                if config.upstream == "vllm"
+                if config.upstream in {"vllm", "sglang"}
                 else ("gguf-full" if ref.format == "gguf" else "mlx-fused"),
                 "created": time.time(),
                 "night": 0,
@@ -913,6 +924,11 @@ def main(argv=None):
     try:
         config = Config.load(root)
         command = args.command
+        if command == "omp-backfill":
+            from .omp_history import backfill
+
+            backfill(args, root, config)
+            return 0
         local = LocalClient(root, config)
         if command not in {"init", "uninstall", "serve"} and catch_up(root, config):
             # Already printed once by catch_up; don't repeat it in the status.
