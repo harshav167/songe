@@ -64,6 +64,7 @@ def setup(config, store):
     for row in registry.entries(store):
         if row["id"] != "learner":  # one learner here; another must read too
             registry.set_learning(store, row["id"], "off")
+            registry.support(store, row["id"], "unsupported", "cannot train")
     learner = store.scoped("learner")
     for task in ("first task", "second task", "third task"):
         session(store, task)
@@ -133,7 +134,8 @@ def test_nothing_is_deleted_while_a_dream_is_under_way(config, store):
     learner.night(night, status="interrupted")
     assert recordings.keep_under(store, 1, now=LATER) == 0
     learner.night(night, status="accepted")
-    assert recordings.keep_under(store, 1, now=LATER) == sum(len(ids) for _, ids in found)
+    # All but the newest session (it holds the newest exchange id).
+    assert recordings.keep_under(store, 1, now=LATER) == sum(len(ids) for _, ids in found[:2])
 
 
 def test_every_learner_learning_from_a_session_must_have_learned_from_it(config, store):
@@ -154,6 +156,58 @@ def test_a_model_with_learning_off_never_learned_from_anything(config, store):
     registry.set_learning(store, "learner", "off")
     assert recordings.keep_under(store, 1, now=LATER) == 0
     assert len(requests(store)) == sum(len(ids) for _, ids in found)
+
+
+def test_another_model_with_learning_off_still_needs_every_session(config, store):
+    """It could be turned on, even to all history, and has read nothing;
+    only a model that can never learn needs nothing kept."""
+    learner, found = setup(config, store)
+    (first, a), _, _ = found
+    read(learner, first, a)
+    registry.observe(config, store, "other")
+    registry.set_learning(store, "other", "off")
+    assert recordings.learned_sessions(store, LATER) == []
+    registry.support(store, "other", "unsupported", "embedding model")
+    assert recordings.learned_sessions(store, LATER) == [(first, a)]
+
+
+def test_sessions_the_checks_use_are_kept(config, store):
+    learner, found = setup(config, store)
+    (first, a), (second, b), _ = found
+    read(learner, first, a)
+    read(learner, second, b)
+    with store.connect() as db:  # a held-out test step from the first
+        db.execute("UPDATE steps SET split='heldout' WHERE json_extract(payload,'$.source_id')=?", (a[0],))
+    # A confirmed success from the second: the drift set.
+    with learner.connect() as db:
+        db.execute(
+            "INSERT INTO signals(id,model_id,session,revision,payload) VALUES (?,?,?,?,?)",
+            ("ok-2", learner.model_id, second, b[-1], json.dumps({
+                "id": "ok-2", "type": "success", "session": second, "confirmed": True,
+                "exchanges": {"1": b[0]}})),
+        )
+    assert recordings.learned_sessions(store, LATER) == []
+
+
+def test_exchange_ids_are_never_given_out_again(config, store):
+    learner, found = setup(config, store)
+    _, (second, b), (third, c) = found
+    newest = max(c)
+    with store.connect() as db:  # as if the newest session were deleted
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO state VALUES ('exchange_id_high', ?)", (json.dumps(newest),))
+        db.execute("DELETE FROM exchanges WHERE id>=?", (min(c),))
+    assert store.record("/v1/chat/completions", {"messages": []}, {}) == newest + 1
+    store.forget()
+    assert store.record("/v1/chat/completions", {"messages": []}, {}) == newest + 2
+
+
+def test_a_forget_during_the_cleanup_stops_it(config, store):
+    learner, found = setup(config, store)
+    (first, a), _, _ = found
+    since = time.time()
+    store.forget()
+    assert recordings.delete_session(store, first, a, since) == 0
 
 
 def test_over_the_limit_with_nothing_learned_says_so(config, store, tmp_path):

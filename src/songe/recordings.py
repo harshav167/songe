@@ -169,7 +169,12 @@ def learned_sessions(store, now=None):
 
     An exchange is learned from when at least one learner's window covers
     it (learning on: level new after its cutoff, or all) and every learner
-    whose window covers it has learned from its session. A session may be
+    whose window covers it has learned from its session. A model with
+    learning off counts as needing every session (it could be turned on,
+    even to all history), unless it can never learn (unsupported).
+    Sessions the checks use are kept: ones with held-out test steps
+    (split heldout) or confirmed successes (the drift set), and the one
+    holding the newest exchange id. A session may be
     deleted when all its exchanges are learned from, and its newest request
     is older than RESUMABLE_SECONDS. Exchanges in no session (session
     titles, failed or unlinkable requests, embeddings) and sessions of a
@@ -188,10 +193,26 @@ def learned_sessions(store, now=None):
         recorded = dict(
             db.execute("SELECT id, COALESCE(recorded_at, created) FROM exchanges").fetchall()
         )
+        # Held-out test steps: the gate checks every Dream on them; losing
+        # them would make practice.pool.ensure_heldout hold back lessons.
+        tests = {
+            r[0]
+            for r in db.execute(
+                "SELECT json_extract(payload,'$.source_id') FROM steps WHERE split='heldout'"
+            )
+        }
     covered = {}  # exchange id -> learned by every learner covering it so far
+    keep = set()  # sessions some learner checks with (drift set)
     for row in registry.entries(store):
         level = row.get("learning_level", "off")
         if level == "off":
+            if row.get("support") == "unsupported":
+                continue  # can never learn: it needs nothing kept
+            # Learning off for now: it could be turned on (even to all
+            # history) and has read nothing, so it still needs everything.
+            for ids in every.values():
+                for i in ids:
+                    covered[i] = False
             continue
         learner = store.scoped(row["id"])
         with learner.connect() as db:
@@ -222,6 +243,9 @@ def learned_sessions(store, now=None):
         extra = set(learner.get(EXTRA_HELD_OUT) or [])
         cluster = cluster_of(learner)
         open_sessions = set()
+        for s in signals(learner, types=("success",)):
+            if s.get("confirmed") is True and s.get("exchanges"):
+                keep.add(s.get("session"))  # the drift set (practice.pool.drift_steps)
         for s in signals(learner, types=LESSON_TYPES):
             if not s.get("lesson") or not s.get("exchanges") or s["id"] in trained:
                 continue  # nothing to practise from it, or already trained
@@ -237,16 +261,21 @@ def learned_sessions(store, now=None):
             for i in ids:
                 covered[i] = covered.get(i, True) and learned
     found = []
+    latest = max(recorded, default=None)
     for session, ids in every.items():
         newest = max(recorded.get(i, now) for i in ids)
         if newest > now - RESUMABLE_SECONDS:
+            continue
+        if session in keep or tests & set(ids) or latest in ids:
+            # Checks use it, or it holds the newest exchange id (belt and
+            # braces with Store.record: ids are never reused).
             continue
         if all(covered.get(i) for i in ids):
             found.append((newest, session, ids))
     return [(session, ids) for _, session, ids in sorted(found)]
 
 
-def delete_session(store, session, ids):
+def delete_session(store, session, ids, since=None):
     """Delete one session's recordings and what was built from them (steps,
     their prefix links and per-step rows), in one transaction, and the parts
     nothing uses any more. Read marks, signals, lessons and practice stay:
@@ -255,6 +284,16 @@ def delete_session(store, session, ids):
     marks = ",".join("?" * len(ids))
     with store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
+        forgotten = db.execute("SELECT value FROM state WHERE key='forgotten_at'").fetchone()
+        if since is not None and forgotten and json.loads(forgotten[0]) >= since:
+            return 0  # forgotten since the sessions were chosen: choose again
+        # Ids above it are never given out again (Store._record).
+        high = db.execute("SELECT MAX(id) FROM exchanges").fetchone()[0] or 0
+        db.execute(
+            "INSERT INTO state VALUES ('exchange_id_high',?) ON CONFLICT(key) DO UPDATE"
+            " SET value=MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))",
+            (json.dumps(high),),
+        )
         steps = [
             r[0]
             for r in db.execute(
@@ -309,9 +348,12 @@ def keep_under(store, limit, now=None):
     for row in registry.entries(store):
         if any(n["status"] in UNDER_WAY for n in store.scoped(row["id"]).nights()):
             return 0
-    deleted = 0
+    deleted, since = 0, time.time()
     for session, ids in learned_sessions(store, now):
-        deleted += delete_session(store, session, ids)
+        gone = delete_session(store, session, ids, since)
+        if not gone:
+            break  # forgotten meanwhile
+        deleted += gone
         if sizes(store)[0] <= limit:
             break
     if deleted:

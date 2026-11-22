@@ -295,9 +295,15 @@ from (`recordings.learned_sessions`): every learner whose window covers the
 session (learning on, after its cutoff for `new`) has read it at its current
 revision, and each lesson signal read from it is trained or absorbed, or has
 practice written and is held out or kept no scene. At least one learner must
-cover it; sessions used in the last 24 hours (an agent may continue them),
-requests in no session, and anything while a night is running, interrupted,
-ready or waiting are never deleted. One transaction per session deletes its
+cover it, and a model with learning off that can still learn (not
+unsupported) counts as needing every session. Never deleted: sessions used
+in the last 24 hours (an agent may continue them), sessions with held-out
+test steps or confirmed successes (drift set), the session holding the
+newest exchange id, requests in no session, and anything while a night is
+running, interrupted, ready or waiting. Exchange ids are never reused:
+`exchange_id_high` in `state` (set by the cleanup and by forget) keeps new
+ids above every deleted one. A forget after the sessions were chosen stops
+the cleanup. One transaction per session deletes its
 exchanges, steps, prefix links and per-step rows, and the parts nothing else
 uses; its signals and read marks move to a `<session>#deleted-…` name listed
 in `pruned_sessions`, so reading never takes them for a vanished session's and
