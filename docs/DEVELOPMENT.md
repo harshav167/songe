@@ -51,7 +51,7 @@ The web view uses bundled fonts and other local static assets, without network d
 
 ## What changes on your machine
 
-- Private data: `~/Library/Application Support/songe` (directory mode `0700`): `config.toml`, SQLite in WAL mode, config backups, calibration, checkpoints, evaluation records, and rotating event logs. Transport headers and Authorization tokens are not stored. Conversation bodies can contain sensitive material; they are the experience being retained.
+- Private data: `~/Library/Application Support/songe` (directory mode `0700`): `config.toml`, SQLite in WAL mode, config backups, calibration, checkpoints, evaluation records, and rotating event logs. Transport headers and Authorization tokens are not stored. Conversation bodies can contain sensitive material; they are the experience being retained. Repeated parts (system prompt, tools, earlier messages) are stored once. Recordings are kept under `recordings_limit_gb` in `config.toml` (default 2): over it, the oldest conversations already learned from are deleted; ones not learned from yet are kept, and `songe doctor` and status say when that leaves them over the limit.
 - LM Studio: new fused versions under `<downloadsFolder>/songe/`, keeping current and previous weights. Existing models and the original base are never deleted. Fusion uses new private directories; only the actual exported artifact's passing gate can authorize publication. Test models use `<downloadsFolder>/songe-test/` only.
 - OpenCode: a `songe` provider in `~/.config/opencode/opencode.json`, using the schema for the installed major version. JSONC files are left for manual configuration.
 - Pi: a `songe` provider in `<agent-dir>/models.json`; respects `PI_CODING_AGENT_DIR`, otherwise uses `~/.pi/agent`.

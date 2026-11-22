@@ -179,6 +179,9 @@ CREATE TABLE IF NOT EXISTS practice (
  id TEXT NOT NULL, model_id TEXT NOT NULL, signal_id TEXT NOT NULL,
  payload TEXT NOT NULL, kept INTEGER NOT NULL, "drop" TEXT, created REAL NOT NULL,
  PRIMARY KEY(id,model_id));
+-- Sessions whose recordings were deleted for the size limit after they were
+-- learned from (recordings.keep_under); their signals and practice stay.
+CREATE TABLE IF NOT EXISTS pruned_sessions (session TEXT PRIMARY KEY, at REAL NOT NULL);
 """
 
 
@@ -800,6 +803,7 @@ class Store:
             db.execute("DELETE FROM signals")
             db.execute("DELETE FROM reading_cache")
             db.execute("DELETE FROM practice")
+            db.execute("DELETE FROM pruned_sessions")
             # Cycle records keep their counts; example text quotes the
             # conversations and goes (docs/CONTRACTS.md, Integration decisions).
             for night_id, raw in db.execute("SELECT id, record FROM nights").fetchall():

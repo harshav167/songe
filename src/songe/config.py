@@ -69,6 +69,12 @@ class Config:
     # Deep Dream (practice, training, checks) starts on its own only after
     # this much quiet, until gap prediction decides it; Dream starts one now.
     deep_quiet_seconds: float = 1200.0
+    # Most space the recorded conversations may use, in GB (issue #73). Over
+    # it, the oldest recordings already learned from are deleted; ones not
+    # learned from yet are always kept (songe doctor says when that leaves
+    # the recordings over the limit). With repeated prompts stored once, a
+    # 200-request agent session with a 13k-token prompt takes about 4 MB.
+    recordings_limit_gb: float = 2.0
     # Before/after examples (docs/CONTRACTS.md): at most this many per set
     # (original moments, held-out practice), and this many trained scenes,
     # so the check stage stays a few minutes on a laptop.
@@ -320,6 +326,7 @@ class Config:
         if any(not 0 < v <= 1 for v in self.wake_scales) or not self.wake_scales:
             raise ValueError("Wake scales must be in (0, 1]")
         for key in (
+            "recordings_limit_gb",
             "idle_default_seconds",
             "slice_default_seconds",
             "slice_max_seconds",

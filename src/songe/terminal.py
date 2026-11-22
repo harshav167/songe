@@ -110,6 +110,8 @@ def status(data):
     if data.get("upgrade_notice") and not os.environ.get("SONGE_NOTICE_SHOWN"):
         output.print(Text(data["upgrade_notice"], style="yellow"))
     output.print(status_text(data))
+    if data.get("recordings_note"):
+        output.print(Text(data["recordings_note"], style="yellow"))
     output.print()
     # Details per model live in the dashboard (songe open), not here.
     models_table(data.get("models", []), data=data)

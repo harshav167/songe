@@ -2811,18 +2811,21 @@ class ModelScheduler(Scheduler):
 
     async def tidy_recordings(self):
         """In an idle gap with nothing else running (no worker, reading or
-        request): the recordings' upkeep (recordings.tidy), off the event
-        loop. Never holds the admission lock, so a request is never held."""
+        request): the recordings' upkeep (recordings.tidy: the size limit,
+        then freed space back to the disk), off the event loop. Never holds
+        the admission lock, so a request is never held."""
         now = time.monotonic()
         if now - getattr(self, "tidied_at", -self.TIDY_SECONDS) < self.TIDY_SECONDS:
             return
         if self.process or self.reading_busy() or any(self.in_flight.values()):
             return
         self.tidied_at = now
-        from .recordings import tidy
+        from .recordings import limit_bytes, tidy
 
         try:
-            await asyncio.to_thread(tidy, self.installation_store)
+            await asyncio.to_thread(
+                tidy, self.installation_store, limit_bytes(self.installation_config)
+            )
         except Exception:
             logger.exception("recordings_tidy_failed")
 

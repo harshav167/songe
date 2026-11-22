@@ -1351,4 +1351,23 @@ def doctor(config, root, local):
             )
     except OSError as exc:
         print(f"Data disk: unavailable · {root} · {exc}")
+    line = recordings_line(config, root)
+    if line:
+        print(line)
     return problems
+
+
+def recordings_line(config, root):
+    """How much the recorded conversations use, against their limit
+    (recordings_limit_gb); read without changing the store."""
+    from .api import ReadOnlyStore
+    from .recordings import limit_bytes, sizes
+    from .wording import recordings_line as line
+
+    if not (root / "experience.sqlite3").exists():
+        return None
+    try:
+        used = sizes(ReadOnlyStore(root))[0]
+    except sqlite3.Error:
+        return None
+    return line(used, limit_bytes(config))

@@ -702,6 +702,34 @@ def dream_message(*, blocked=None, reading=0, unread="", wait=None):
 FLOW_HIDDEN = {"cycle", "done"}
 
 
+# Recorded conversations and their size limit (recordings_limit_gb).
+def gigabytes(size):
+    return f"{size / 1e9:.1f} GB"
+
+
+def recordings_deleted(count):
+    return (
+        f"deleted {plural(count, 'old recorded request')}"
+        " · already learned from, over the size limit"
+    )
+
+
+def recordings_line(used, limit):
+    """songe doctor: how much the recordings use, against their limit."""
+    if used <= limit:
+        return f"Recordings: {gigabytes(used)} of the {gigabytes(limit)} limit"
+    return f"Recordings: {gigabytes(used)} · {recordings_note(used, limit)}"
+
+
+def recordings_note(used, limit):
+    """Status, when the recordings are over their limit: nothing is deleted
+    before it has been learned from."""
+    return (
+        f"Recordings are over the {gigabytes(limit)} limit and waiting to be"
+        " learned from; the oldest are deleted once they are"
+    )
+
+
 def flow_line(stage, text):
     """One plain line per event, or None when another line already says it.
 

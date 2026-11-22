@@ -286,6 +286,26 @@ copies), then space returns in 16 MiB steps. New stores start incremental. A
 recording waiting on the write lock retries (up to a minute) instead of being
 lost.
 
+### Size limit on recordings (`recordings_limit_gb`, default 2)
+
+In the same idle upkeep, when the store's pages in use exceed the limit,
+`recordings.keep_under` deletes whole sessions that have been learned from,
+the one whose newest request is oldest first, until it is under. Learned
+from (`recordings.learned_sessions`): every learner whose window covers the
+session (learning on, after its cutoff for `new`) has read it at its current
+revision, and each lesson signal read from it is trained or absorbed, or has
+practice written and is held out or kept no scene. At least one learner must
+cover it; sessions used in the last 24 hours (an agent may continue them),
+requests in no session, and anything while a night is running, interrupted,
+ready or waiting are never deleted. One transaction per session deletes its
+exchanges, steps, prefix links and per-step rows, and the parts nothing else
+uses; its signals and read marks move to a `<session>#deleted-…` name listed
+in `pruned_sessions`, so reading never takes them for a vanished session's and
+practice, lessons and replay keep their own copies. Over the limit with
+nothing learned from, nothing is deleted: `/api/state` carries
+`recordings_note`, shown by status, and `songe doctor` prints a `Recordings:`
+line either way.
+
 ### Rewind lessons (additive v2 table)
 
 `lessons` stores `(id, model_id)` plus `group_key`, JSON `payload`,
