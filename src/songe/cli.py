@@ -77,10 +77,18 @@ def parser():
     undo = commands.add_parser("undo", help="Return a model to its previous version")
     undo.add_argument("model", nargs="?")
     undo.add_argument("--version")
-    commands.add_parser("status", help="What Songe is doing")
-    models = commands.add_parser(
-        "models", help="List models · auto-dream on|off"
+    seed = commands.add_parser(
+        "omp-backfill", help="Preview or import saved OMP turns for one model"
     )
+    seed.add_argument("sessions", type=Path)
+    seed.add_argument("--provider", required=True, help="Exact historical OMP provider")
+    seed.add_argument("--model", required=True, help="Exact historical OMP model ID")
+    seed.add_argument("--target", required=True, help="Matching Songe primary base ID")
+    seed.add_argument(
+        "--apply", action="store_true", help="Write matches (default is preview only)"
+    )
+    commands.add_parser("status", help="What Songe is doing")
+    models = commands.add_parser("models", help="List models · auto-dream on|off")
     models.add_argument("model", nargs="?")
     models.add_argument("level", nargs="?", choices=("on", "off"))
     for name, text in (
@@ -913,6 +921,11 @@ def main(argv=None):
     try:
         config = Config.load(root)
         command = args.command
+        if command == "omp-backfill":
+            from .omp_history import backfill
+
+            backfill(args, root, config)
+            return 0
         local = LocalClient(root, config)
         if command not in {"init", "uninstall", "serve"} and catch_up(root, config):
             # Already printed once by catch_up; don't repeat it in the status.
