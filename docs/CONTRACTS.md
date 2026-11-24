@@ -107,6 +107,15 @@ or by auto-dream:
   only means the user's own words: kept verbatim and ranked first. A stated
   rule points at the step it is about, so a Deep Dream practises it like any
   other lesson and, once adopted, it leaves the prompt.
+- A preference the user states about themself ("I avoid dairy.", "我不吃辣")
+  is kept the same way: their sentence, word for word, in the prompt at once.
+  It counts wherever it stands, the opening message included. Rules find the
+  candidates (`rules.preference_sentences`: first person, a word of taste,
+  habit or need, not a question, not a pick among things just offered); the
+  served model is asked one question per candidate (`preference`) and only
+  "about_me" is kept, not a reaction to the last answer, a line about the job,
+  or a line of a text handed over to be worked on. It points at the step it is
+  about, or at the answer it got when nothing came before.
 - Deep Dream (2–3 hours, skills): reads what is left, writes practice, trains,
   checks. When one is adopted, the lessons whose signals it trained leave the
   prompt (`quick.absorb`); an undo lets them come back.
@@ -256,6 +265,61 @@ States: `awake` (serving, recording) → `settling` (working in an idle gap) →
 - `steps`: id, conversation, split, signal (`later_success`|`tool_error`|`exec_failure`|`user_correction`|`loop`|`static_invalid`|`retry`|`approval`), strength, evidence, answer_hint, env_fingerprint (tool schema hash), retired_at, retired_reason.
 - `scoreboard`: day, model_version, repeat_error_rate, steps_per_task, tool_call_valid_rate, general_drift — computed from daytime logs only.
 - `slices`: started, ended, phase, units_done, interrupted_by.
+
+### Repeated parts stored once (schema v3, `songe/parts.py`)
+
+Every agent request resends its system prompt, tools and whole history, and
+each step copies a request's history (context) and what followed (hindsight,
+evidence). `exchanges.request` and `steps.payload` are stored as a skeleton
+plus `refs` JSON `{key: id | [ids]}`: every item but the last of a message
+list (`messages`; `context`, `hindsight`, `evidence`) and any other top-level
+value of 1 KB or more is a row of `parts` (its exact `json.dumps` text, once
+per SHA-256). The last list item stays in the skeleton, so SQL on it
+(`$.hindsight[#-1].role`, compaction markers, non-empty checks) is unchanged.
+Readers use `parts.request` / `parts.payload` / `parts.request_of` and get the
+recorded value exactly; a row without `refs` is plain JSON (older rows, a
+store read without upgrading it). `part_uses` counts referencing rows through
+triggers; `parts.collect` deletes unused parts in the deleting transaction.
+`steps.evidence` (a copy of the payload's evidence no reader used) is `[]`.
+
+Upgrading adds the tables, columns and triggers in Store's schema
+transaction and sets `user_version` 3 (an older Songe refuses the store). The
+guarded experience child then rewrites older rows (`recordings.dedupe`) in
+batches of 16, each one transaction with its cursor in `state`
+(`parts_cursor_<table>`): a stop loses nothing and the next run resumes. Each
+rewritten row is read back and compared first; one that differs stays plain.
+In an idle gap with no worker, reading or request, the service gives freed
+space back (`recordings.compact`): a store made before v3 is rewritten once
+(`VACUUM`, switching to incremental auto-vacuum, only with room for two
+copies), then space returns in 16 MiB steps. New stores start incremental. A
+recording waiting on the write lock retries (up to a minute) instead of being
+lost.
+
+### Size limit on recordings (`recordings_limit_gb`, default 2)
+
+In the same idle upkeep, when the store's pages in use exceed the limit,
+`recordings.keep_under` deletes whole sessions that have been learned from,
+the one whose newest request is oldest first, until it is under. Learned
+from (`recordings.learned_sessions`): every learner whose window covers the
+session (learning on, after its cutoff for `new`) has read it at its current
+revision, and each lesson signal read from it is trained or absorbed, or has
+practice written and is held out or kept no scene. At least one learner must
+cover it, and a model with learning off that can still learn (not
+unsupported) counts as needing every session. Never deleted: sessions used
+in the last 24 hours (an agent may continue them), sessions with held-out
+test steps or confirmed successes (drift set), the session holding the
+newest exchange id, requests in no session, and anything while a night is
+running, interrupted, ready or waiting. Exchange ids are never reused:
+`exchange_id_high` in `state` (set by the cleanup and by forget) keeps new
+ids above every deleted one. A forget after the sessions were chosen stops
+the cleanup. One transaction per session deletes its
+exchanges, steps, prefix links and per-step rows, and the parts nothing else
+uses; its signals and read marks move to a `<session>#deleted-…` name listed
+in `pruned_sessions`, so reading never takes them for a vanished session's and
+practice, lessons and replay keep their own copies. Over the limit with
+nothing learned from, nothing is deleted: `/api/state` carries
+`recordings_note`, shown by status, and `songe doctor` prints a `Recordings:`
+line either way.
 
 ### Rewind lessons (additive v2 table)
 
@@ -440,6 +504,10 @@ status lines.
   the summary shape.
 - `GET /api/cycles/<cycle id>` returns one full cycle record: every signal,
   every practice line, every example, all losses and checks.
+- `GET /api/nights/<night id>` includes `record.training_settings` for new
+  runs. It captures the resolved training policy and each setting's source at
+  cycle start. Resumed slices retain this snapshot and record their adaptive
+  sizing in `record.slice_sizes`.
 
 ```jsonc
 // ModelLearning
@@ -644,6 +712,12 @@ most a one-line label on an example.
   whether the set is precise enough to be the reference). Until both hold,
   the general anchors stay the "not broken" reference, as today. The check
   records which one gated and why (`drift_checks` in the cycle record).
+  Beside the mean drift, `gate_values` keeps for each version what that mean
+  does not show, on the set that gated: `base_entropy` and `entropy`
+  (nats/token, the base's and the version's), `entropy_change` (relative)
+  and `agreement` (the share of tokens where both prefer the same one), from
+  the same logits as the KL. Recorded only: they gate nothing. `None` where
+  not measured (the first Dream's incumbent is the base itself).
 
 - Under Dreams, "did it get better?" is judged on what each version writes
   (`sleep/judged.py`), not on the KL to the teacher along the original
@@ -654,7 +728,9 @@ most a one-line label on an example.
   the version in use and the candidate answer deterministically (384 tokens);
   the same action is a tie; a different one goes to the original base model
   (blind A/B: request, the user's feedback or the lesson, both answers):
-  win, loss or tie, with a clear teacher preference breaking "both/neither".
+  win, loss or tie. "Both", "neither", a pick that changes with the order
+  or a reply that cannot be read is a tie; the teacher's preference, which
+  training fits, never breaks it.
   Each moment is one unit (win +1, loss −1, tie 0), resampled per moment
   (user decision: per conversation, 5 units left the lower bound at 0); at
   least `min_heldout` conversations must be present. Adopt only if wins >

@@ -15,6 +15,7 @@ import time
 
 import httpx
 
+from . import parts
 from .steps import message_key, reply_key
 
 logger = logging.getLogger(__name__)
@@ -73,15 +74,19 @@ def window(step):
 def pending(store, limit):
     """Unreviewed user replies that end a step, newest first."""
     found = {}
-    with store.connect() as db:
-        rows = db.execute(
-            "SELECT id,payload FROM steps WHERE retired_at IS NULL "
-            "AND json_extract(payload,'$.hindsight[#-1].role')='user' "
-            "ORDER BY rowid DESC LIMIT ?",
-            (limit * 20,),
-        ).fetchall()
-    for step_id, payload in rows:
-        step = json.loads(payload)
+    with store.connect() as db, parts.snapshot(db):
+        # The last hindsight message stays in the stored payload (parts.py).
+        cache = {}
+        rows = [
+            (row["id"], parts.payload(db, row, cache))
+            for row in db.execute(
+                "SELECT * FROM steps WHERE retired_at IS NULL "
+                "AND json_extract(payload,'$.hindsight[#-1].role')='user' "
+                "ORDER BY rowid DESC LIMIT ?",
+                (limit * 20,),
+            ).fetchall()
+        ]
+    for step_id, step in rows:
         key = reply_key(step)
         found.setdefault(key, (step, []))[1].append(step_id)
     done = store.reviewed(list(found)) if found else set()

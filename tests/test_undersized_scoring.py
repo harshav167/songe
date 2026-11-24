@@ -52,7 +52,7 @@ def legacy_state(config, store, *, overwritten_policy=True):
     with store.connect() as db:
         db.execute("UPDATE models SET learning_level='new',learning_cutoff=1")
         db.executemany(
-            "INSERT INTO exchanges VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO exchanges(id,created,path,request,response,status,complete,binding,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
             [
                 (i, 2, "/v1/chat/completions", "{}", "{}", 200, 1, "base", 2)
                 for i in range(1, 1404)

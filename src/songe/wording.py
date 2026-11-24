@@ -4,6 +4,16 @@ import math
 import re
 from datetime import datetime
 
+TRAINING_SETTINGS = "Training settings"
+IGNORED_MODEL_SETTINGS = "Ignored per-model settings"
+# Measuring ran out of room on the graphics card (live #135: vLLM held most of
+# the card). Worded without "memory": those reasons read as waits that clear
+# by themselves, and this one needs the user.
+DEVICE_FULL = (
+    "the graphics card is too full to train beside your model server · stop the server "
+    "while the Dream runs, give it a smaller share of the card, or use a second card"
+)
+
 
 def readable(value):
     text = str(value or "")
@@ -344,6 +354,8 @@ def model_problem(model):
             return (
                 readable(reason) or "Learning is unavailable for this model"
             ) + " · Choose another model or run songe doctor."
+        if DEVICE_FULL in reason:
+            return capitalize(DEVICE_FULL) + "."  # it does not clear by itself
         if re.search(r"memory|free \d|needs \d.*GB", reason, re.I):
             return None  # resolves automatically; not a fix for the user
         if re.search(r"fail|doctor|error", reason, re.I):
@@ -700,6 +712,34 @@ def dream_message(*, blocked=None, reading=0, unread="", wait=None):
 
 
 FLOW_HIDDEN = {"cycle", "done"}
+
+
+# Recorded conversations and their size limit (recordings_limit_gb).
+def gigabytes(size):
+    return f"{size / 1e9:.1f} GB"
+
+
+def recordings_deleted(count):
+    return (
+        f"deleted {plural(count, 'old recorded request')}"
+        " · already learned from, over the size limit"
+    )
+
+
+def recordings_line(used, limit):
+    """songe doctor: how much the recordings use, against their limit."""
+    if used <= limit:
+        return f"Recordings: {gigabytes(used)} of the {gigabytes(limit)} limit"
+    return f"Recordings: {gigabytes(used)} · {recordings_note(used, limit)}"
+
+
+def recordings_note(used, limit):
+    """Status, when the recordings are over their limit: nothing is deleted
+    before it has been learned from."""
+    return (
+        f"Recordings are over the {gigabytes(limit)} limit and waiting to be"
+        " learned from; the oldest are deleted once they are"
+    )
 
 
 def flow_line(stage, text):

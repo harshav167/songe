@@ -59,6 +59,12 @@ RESPONSIBLE_SCHEMA = {
     "required": ["steps", "reason"],
 }
 
+PREFERENCE_SCHEMA = {
+    "type": "object",
+    "properties": {"kind": {"type": "string", "enum": ["about_me", "reaction", "task", "text"]}},
+    "required": ["kind"],
+}
+
 LESSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -107,7 +113,7 @@ Answer with JSON only."""
 REVIEW = """You are reviewing what a coding agent did for this request:
 {task}
 
-These are the commands the agent ran in one turn, with their output:
+{ran}
 {steps}
 
 Find outputs that carry information the agent must use, or that show its work is wrong or right, even though no error was reported. Most turns have none: return an empty list then.
@@ -115,8 +121,25 @@ Types:
 - "outcome": information the next steps should use. Example: "APPLE  Y...G" from a word game, "500: higher" from a guessing game.
 - "failed_result": output that shows the work is wrong without an error message. Example: after implementing a converter, "III -> 0, IV -> 0, IX -> 0".
 - "success": output that proves the requested work now does what the user asked. Example: the user wanted `python3 -m pkg circle 2` to print 12.57 and the output is "circle 2: 12.57".
-Not signals: output that merely shows a command ran, file contents, git status, listings, compile checks like "syntax OK", or any error message (those are handled elsewhere).
+Not signals: output that merely shows a command ran, file contents, git status, listings, compile checks like "syntax OK", or {errors}
 For each signal give the step number, the type, a short quote of the output, and why it matters. Answer with JSON only."""
+
+# The two wordings of the review. A turn of shell commands is asked as it
+# always was: the rules find a command's errors (exit codes, tracebacks), so
+# the review leaves them alone. Nothing else reads the result of an agent's
+# own function or MCP tool, so there a refusal or an error is itself a signal.
+REVIEW_COMMANDS = {
+    "ran": "These are the commands the agent ran in one turn, with their output:",
+    "errors": "any error message (those are handled elsewhere).",
+}
+REVIEW_TOOLS = {
+    "ran": "These are the tool calls the agent made in one turn, with their results:",
+    "errors": (
+        "the error message of a shell command (those are handled elsewhere). When one of the agent's other "
+        "tools refuses a call or says the result is wrong (a move that is not allowed, a value it does not "
+        'accept, an attempt that failed), that is a signal of type "failed_result".'
+    ),
+}
 
 RESPONSIBLE = """You are reviewing what a coding agent did for this request:
 {task}
@@ -157,7 +180,7 @@ Why these steps are responsible: {reason}
 What the agent did after the feedback:
 {after}
 
-Write what the agent should do differently next time.
+Write what the agent should do differently next time.{wish}
 - lesson: one or two sentences of advice that would also help on a different task of the same kind. Name the general practice; do not mention this task's files, function names or values.
   Good: "When renaming a function, search for every way it is used, including names built as strings, and run the program's entry points before saying it is done."
   Bad: "Update report.py to use circle_area."
@@ -171,6 +194,45 @@ Answer with JSON only."""
 
 
 
+# Added to the lesson question when the feedback is the user's own words. A
+# wish said in passing ("uv please", "in metric please") is a standing
+# preference, and the lesson must keep the thing the user named. Live
+# (Qwen3.5-4B, 24 chats corrected in everyday words): "I use uv, not pip." was
+# stored as "Verify the user's preferred package manager before providing
+# instructions." and no answer changed. Shapes with placeholders, not worked
+# examples: a worked example is copied (see EXAMPLE_LESSONS).
+USER_WISH = """
+The feedback is the user's own words. If it tells the agent how this user wants things (which tool, which format, which wording, which units, which style), that wish itself is the lesson, and the rule below about naming the general practice does not apply:
+  - lesson and short are the direct instruction and name exactly what the user named, in the user's words. The user's key words (the name of the tool, the unit, the phrase, the format) must appear in both, written out. Never replace them with their category ("the preferred tool", "the requested format") and never turn the wish into advice to check, verify or ask.
+    Shapes, where <THING> and <OTHER> stand for the user's own words:
+    "<THING>, not <OTHER>." -> "Use <THING>, not <OTHER>."
+    "<THING> please." -> "Use <THING>." or "Write <THING>."
+    "You forgot <THING>." -> "Always include <THING>."
+  - generality is "always" for such a wish, unless the user limited it to this one task."""
+
+# Asked about a sentence the rules flagged as a possible preference of the
+# user's own (rules.preference_sentences). Only "about_me" is kept. The other
+# three are what such a sentence turned out to be in real chats: a pick among
+# offers or a word on the last answer ("I love the new layout"), a line about
+# the job ("I only get three results"), a line of a text handed over to be
+# worked on (a cover letter or an essay in the first person).
+PREFERENCE = """A user is talking with an AI assistant.
+
+What the assistant said just before (nothing at the start of a conversation):
+{before}
+
+The user's message:
+{message}
+
+One sentence of that message:
+{sentence}
+
+What is this sentence? Choose one:
+- "about_me": the user tells the assistant something lasting about themself: what they like or dislike, what they avoid or cannot have, what they need, what they always or never do. It would still be true in another conversation next month.
+- "reaction": the user reacts to what the assistant just said or made, or picks among things it offered.
+- "task": the user describes the job at hand: what they want now, what they are working on, what happened, an error, a result.
+- "text": the user is not speaking as themself here. The sentence belongs to a text they hand over to be worked on (to translate, correct, rewrite, answer, continue): a letter, an email, an essay, a story, a post, another chatbot's reply. Or it is the line of a character in a role-play or a dialogue, or the words of another person.
+Answer with JSON only."""
 
 # The prompt's own example lessons: a lesson that repeats one of them was
 # copied, not written (live: Granite 3B on LM Studio gave all 9 signals the
@@ -191,5 +253,7 @@ def copied_example(lesson):
     text = " ".join(str(lesson or "").lower().split())
     if not text:
         return False
+    if "<thing>" in text or "<other>" in text:
+        return True  # a shape of USER_WISH with its placeholders left in
     return any(difflib.SequenceMatcher(None, text, " ".join(e.lower().split())).ratio() > 0.8
                or text.startswith(" ".join(e.lower().split())[:50]) for e in EXAMPLE_LESSONS)

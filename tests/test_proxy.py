@@ -437,3 +437,39 @@ async def test_disconnect_before_upstream_headers_cancels_request(config, store)
         await asyncio.wait_for(app(scope, receive, send), 2)
     assert cancelled.is_set()
     await upstream.aclose()
+
+
+async def test_recordings_use_their_own_thread(config, store, monkeypatch):
+    """A recording waiting on the database lock never takes the default
+    thread pool the request path shares (issue #73 review)."""
+    import threading
+
+    threads, real = [], store.record
+
+    def record(*args):
+        threads.append(threading.current_thread().name)
+        return real(*args)
+
+    monkeypatch.setattr(store, "record", record)
+
+    async def handler(request):
+        return httpx.Response(
+            200,
+            stream=Chunks(
+                [b'{"choices":[{"message":{"role":"assistant","content":"Okay"}}]}']
+            ),
+        )
+
+    app, upstream = await pair(config, store, handler)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        response = await client.post(
+            "/v1/chat/completions", json={"model": "songe/test", "messages": []}
+        )
+        assert response.status_code == 200
+    await upstream.aclose()
+    assert threads and all(name.startswith("songe-record") for name in threads)

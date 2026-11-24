@@ -31,7 +31,7 @@ def test_durable_atomic_swap_and_restart(store):
     assert reopened.get("previous") == "night-1"
     with store.connect() as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
     assert store.root.stat().st_mode & 0o777 == 0o700
 
 

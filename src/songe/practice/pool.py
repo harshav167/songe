@@ -77,6 +77,18 @@ def practice_steps(store, split="train"):
     return steps
 
 
+def practice_revisions(store):
+    """{step id: revision} of every kept scene practice_steps returns (both
+    splits), read by SQLite: no scene is decoded."""
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT id, rowid FROM practice WHERE model_id=? AND kept=1"
+            " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0",
+            (store.model_id,),
+        ).fetchall()
+    return {"practice:" + scene: rowid for scene, rowid in rows}
+
+
 MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's test moments
 DRIFT_MAX = 48  # confirmed successes measured for drift, at most
 
@@ -211,6 +223,7 @@ def heldout_fill(store, missing):
 def drift_steps(store):
     """The drift set: confirmed successes, each at the request that produced
     the checked action. Their session is their conversation (for clustering)."""
+    from ..parts import request_of
     from ..reading.store import signals
 
     steps, seen = [], set()
@@ -223,11 +236,8 @@ def drift_steps(store):
             if exchange in seen:
                 continue
             seen.add(exchange)
-            row = db.execute("SELECT request FROM exchanges WHERE id=?", (exchange,)).fetchone()
-            if not row:
-                continue
-            request = json.loads(row[0])
-            if not request.get("messages"):
+            request = request_of(db, exchange)
+            if not isinstance(request, dict) or not request.get("messages"):
                 continue
             steps.append(
                 {

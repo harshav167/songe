@@ -286,6 +286,8 @@ class TorchBackend:
                     gradient_checkpointing_kwargs={"use_reentrant": False}
                 )
         self.trainable = train
+        # Set by train_step when a prefix cache cannot be kept under checkpointing.
+        self._window_only = False
         self.model.eval()
         self._optimizer = None
         self._schedule = None
@@ -432,6 +434,61 @@ class TorchBackend:
                 )
                 past = self._cache(out)
         return past
+
+    @contextlib.contextmanager
+    def frozen(self, past):
+        """Let checkpointed layers read a prefix cache; yields whether they can.
+
+        Transformers takes the cache away from a checkpointed layer in
+        training, because the layer would add to it a second time when the
+        backward pass runs the layer again. Here every addition is undone as
+        soon as it returns, so both runs read the same prefix. Caches of
+        another kind (recurrent state) and layers transformers does not
+        checkpoint itself are left alone: the caller then trains on the
+        window only.
+        """
+        from transformers.cache_utils import DynamicLayer
+        from transformers.modeling_layers import GradientCheckpointingLayer
+
+        layers = [
+            m
+            for m in self._causal().modules()
+            if isinstance(m, GradientCheckpointingLayer) and m.gradient_checkpointing
+        ]
+        states = getattr(past, "layers", None)
+        if (
+            not layers
+            or not states
+            or not all(hasattr(m, "_can_checkpoint_with_cache") for m in layers)
+            or not all(isinstance(c, DynamicLayer) for c in states)
+        ):
+            yield False
+            return
+
+        def read_only(state):
+            update = state.update
+
+            def reading(*args, **kwargs):
+                before = dict(vars(state))
+                try:
+                    return update(*args, **kwargs)
+                finally:
+                    vars(state).clear()
+                    vars(state).update(before)
+
+            state.update = reading
+
+        try:
+            for state in states:
+                read_only(state)
+            for m in layers:
+                m._can_checkpoint_with_cache = True
+            yield True
+        finally:
+            for m in layers:
+                vars(m).pop("_can_checkpoint_with_cache", None)
+            for state in states:
+                vars(state).pop("update", None)
 
     def hidden(self, ids):
         inputs = self.torch.tensor([ids], dtype=self.torch.long, device=self.device)
@@ -680,13 +737,21 @@ class TorchBackend:
         split = min(
             len(prompt) - 1, max(0, len(prompt) - max(1, config.max_sequence - len(y)))
         )
-        # Transformers drops the cache under gradient checkpointing in training
-        # mode; there the student sees only the window (the teacher still reads
-        # the full context), so a long agent context never exceeds the measured
-        # backpropagation memory.
+        # The context before the window is read with no gradient and kept only
+        # as model state, as on MLX: the student sees what the teacher sees.
+        # Under gradient checkpointing transformers would drop that state in
+        # training mode, so it is frozen for the layers to read (see frozen).
+        # Where it cannot be, the student sees only the window.
         checkpointing = getattr(self._causal(), "is_gradient_checkpointing", False)
         past = (
-            self.prefix_state(prompt[:split]) if split and not checkpointing else None
+            self.prefix_state(prompt[:split])
+            if split and not (checkpointing and getattr(self, "_window_only", False))
+            else None
+        )
+        keeping = (
+            self.frozen(past)
+            if checkpointing and past is not None
+            else contextlib.nullcontext(True)
         )
         tail = prompt[split:]
         self.model.train()
@@ -695,8 +760,13 @@ class TorchBackend:
             if self._auto(self._option("offload_activations"))
             else contextlib.nullcontext()
         )
-        try:
-            saving.__enter__()
+        with contextlib.ExitStack() as stack:
+            stack.callback(self.model.eval)
+            stack.enter_context(saving)
+            # Entered for the backward pass too: it runs the layers again.
+            if not stack.enter_context(keeping):
+                # Remembered, so later steps do not read a prefix for nothing.
+                self._window_only, past = True, None
             inputs = self.torch.tensor([tail + y[:-1]], device=self.device)
             hidden = (
                 self._causal()
@@ -744,9 +814,6 @@ class TorchBackend:
                 },
                 len(y),
             )
-        finally:
-            saving.__exit__(None, None, None)
-            self.model.eval()
 
     def optimizer(self, schedule):
         import torch
@@ -854,10 +921,23 @@ class TorchBackend:
             self._peak_rss = self._process.memory_info().rss
 
     def kl_from(self, base, prompt, teacher_prompt, y, *, hindsight=False):
+        return self.measure(base, prompt, teacher_prompt, y, hindsight=hindsight)["kl"]
+
+    def measure(self, base, prompt, teacher_prompt, y, *, hindsight=False):
+        """This version against the reference along y, per answer token: the
+        KL, and what a mean KL does not show: each side's entropy (nats) and
+        how often their most likely token is the same. From the logits the
+        KL is computed on, so it costs no forward pass."""
         reference = base.teacher if hindsight else base.base
-        with reference():
-            teacher_h = base.teacher_hidden(teacher_prompt, y)
-        total = 0.0
+        # Passed in, not entered here: teacher_hidden reads with the original
+        # base unless it is given the context that selects the weights.
+        teacher_h = base.teacher_hidden(teacher_prompt, y, reference())
+        total = {"kl": 0.0, "entropy": 0.0, "reference_entropy": 0.0, "agreement": 0.0}
+
+        def entropy(logits):
+            # entr(0) is 0: a token with no probability adds nothing.
+            return float(self.torch.special.entr(logits.float().softmax(-1)).sum())
+
         with self.torch.no_grad():
             candidate_h = self._response_hidden(prompt, y)
             for start in range(0, len(y), base.config.token_chunk):
@@ -865,9 +945,14 @@ class TorchBackend:
                 end = min(start + base.config.token_chunk, len(y))
                 with reference():
                     teacher = base.head(teacher_h[:, start:end])
-                value = divergence(self.head(candidate_h[:, start:end]), teacher)
-                total += float(value) * (end - start)
-        return total / len(y)
+                student = self.head(candidate_h[:, start:end])
+                total["kl"] += float(divergence(student, teacher)) * (end - start)
+                total["entropy"] += entropy(student)
+                total["reference_entropy"] += entropy(teacher)
+                total["agreement"] += float(
+                    (student.argmax(-1) == teacher.argmax(-1).to(student.device)).sum()
+                )
+        return {k: v / len(y) for k, v in total.items()}
 
     def adapter_weights(self):
         return {
@@ -895,9 +980,19 @@ class TorchBackend:
             qr, rr = torch.linalg.qr(right)
             u, singular, vh = torch.linalg.svd(rl @ rr.T, full_matrices=False)
             rank = a1.shape[0]
-            root = singular[:rank].sqrt()
-            weights[key] = ((qr @ vh.T[:, :rank]) * root).T.to(a1.dtype)
-            weights[bkey] = ((ql @ u[:, :rank]) * root).to(b1.dtype)
+            kept = min(rank, singular.shape[0])
+            root = singular[:kept].sqrt()
+            a = ((qr @ vh.T[:, :kept]) * root).T
+            b = (ql @ u[:, :kept]) * root
+            # Narrow layers (Qwen3.5 in_proj_a/b: 32 outputs at rank 64)
+            # compress below the configured rank. Zero rows and columns keep
+            # every factor its parameter's shape; the product is unchanged
+            # (as in the MLX backend).
+            if kept < rank:
+                a = torch.cat((a, a.new_zeros(rank - kept, a.shape[1])))
+                b = torch.cat((b, b.new_zeros(b.shape[0], rank - kept)), dim=1)
+            weights[key] = a.to(a1.dtype)
+            weights[bkey] = b.to(b1.dtype)
         with torch.no_grad():
             for name, param in self.model.named_parameters():
                 if name in weights:

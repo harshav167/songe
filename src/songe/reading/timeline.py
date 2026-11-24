@@ -14,6 +14,7 @@ correction arrives later in the same session as the work it corrects.
 
 import json
 
+from .. import parts
 from ..steps import CONTINUED
 
 # opencode before 1.19, and 1.19.
@@ -215,18 +216,20 @@ def _linked(db):
         if source is not None:
             found.setdefault(root, set()).add(int(source))
     first = {root: min(ids) for root, ids in found.items()}
-    requests = {}
+    requests, cache = {}, {}
 
     def request(i):
         if i not in requests:
-            row = db.execute(
-                "SELECT request, response FROM exchanges WHERE id=?", (i,)
-            ).fetchone()
-            requests[i] = (
-                (json.loads(row[0]), json.loads(row[1]) if row[1] else None)
-                if row
-                else ({}, None)
-            )
+            with parts.snapshot(db):
+                row = db.execute("SELECT * FROM exchanges WHERE id=?", (i,)).fetchone()
+                requests[i] = (
+                    (
+                        parts.request(db, row, cache),
+                        json.loads(row["response"]) if row["response"] else None,
+                    )
+                    if row
+                    else ({}, None)
+                )
         return requests[i]
 
     # Title-only roots carry no agent work.
@@ -237,8 +240,10 @@ def _linked(db):
     compactions = []
     like = " OR ".join("request LIKE ?" for _ in COMPACT)
     for (i,) in db.execute(
+        # The markers are in the last message, which stays in the stored
+        # request itself (parts.py), so this search still finds them.
         f"SELECT id FROM exchanges WHERE {like} ORDER BY id", [f"%{c}%" for c in COMPACT]
-    ):
+    ).fetchall():
         req, resp = request(i)
         if kind_of(req) != "compaction":
             continue
@@ -305,15 +310,17 @@ def _linked(db):
 def load(db, exchange_ids):
     """The rows build() takes, for these exchanges."""
     marks = ",".join("?" * len(exchange_ids))
-    return [
-        (
-            i,
-            json.loads(request),
-            json.loads(response) if response else None,
-            status,
-        )
-        for i, request, response, status in db.execute(
-            f"SELECT id,request,response,status FROM exchanges WHERE id IN ({marks}) ORDER BY id",
-            list(exchange_ids),
-        )
-    ]
+    cache = {}
+    with parts.snapshot(db):
+        return [
+            (
+                row["id"],
+                parts.request(db, row, cache),
+                json.loads(row["response"]) if row["response"] else None,
+                row["status"],
+            )
+            for row in db.execute(
+                f"SELECT * FROM exchanges WHERE id IN ({marks}) ORDER BY id",
+                list(exchange_ids),
+            ).fetchall()
+        ]

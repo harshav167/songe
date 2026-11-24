@@ -13,6 +13,11 @@ def refresh(config, store):
         if rows < 32 or not changed:
             break
     store.scoreboard_from_steps()
+    # Rows recorded before repeated parts were shared are rewritten here, in
+    # this guarded child, never in the serving process (recordings.dedupe).
+    from .recordings import dedupe
+
+    dedupe(store)
 
 
 def main():

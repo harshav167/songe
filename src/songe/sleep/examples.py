@@ -20,6 +20,7 @@ import contextlib
 import json
 import re
 
+from ..parts import request_of
 from .evaluate import health
 from .prompts import UnusableStep, paired_prompts, render
 
@@ -49,13 +50,12 @@ def original_moments(store):
             pick = max if s.get("source") == "user" else min
             step = pick(int(n) for n in s["exchanges"])
             exchange = s["exchanges"][str(step)]
-            row = db.execute(
-                "SELECT request, COALESCE(recorded_at, created) FROM exchanges WHERE id=?",
-                (exchange,),
-            ).fetchone()
-            if not row:
+            found = request_of(db, exchange, "*")
+            if not found:
                 continue
-            request = json.loads(row[0])
+            request = found["request"]
+            at = found.get("recorded_at")
+            row = (None, found["created"] if at is None else at)
             messages = request.get("messages") or []
             asked = next(
                 (m for m in reversed(messages) if m.get("role") == "user"), {}

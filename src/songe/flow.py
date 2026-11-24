@@ -7,6 +7,7 @@ your reply, the review's reading of it, and whether cleaning keeps the step.
 
 import json
 
+from . import parts
 from .sleep.clean import verdict
 from .steps import reply_key
 from .wording import flow_line
@@ -60,12 +61,16 @@ def flow(store, events=60, steps=12, *, every_model=False):
     from .models.library import model_name
 
     store.load_reviews()
-    with store.connect() as db:
-        rows = db.execute(
-            "SELECT payload FROM steps WHERE retired_at IS NULL "
-            "ORDER BY rowid DESC LIMIT ?",
-            (steps,),
-        ).fetchall()
+    with store.connect() as db, parts.snapshot(db):
+        cache = {}
+        rows = [
+            parts.payload(db, row, cache)
+            for row in db.execute(
+                "SELECT * FROM steps WHERE retired_at IS NULL "
+                "ORDER BY rowid DESC LIMIT ?",
+                (steps,),
+            ).fetchall()
+        ]
     reviews = {
         key: " · ".join(
             filter(
@@ -95,5 +100,5 @@ def flow(store, events=60, steps=12, *, every_model=False):
             )
             and (line := flow_line(e["stage"], e["text"]))
         ],
-        "steps": [raw_step(json.loads(row[0]), reviews) for row in rows],
+        "steps": [raw_step(step, reviews) for step in rows],
     }

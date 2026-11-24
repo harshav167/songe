@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime
 from itertools import chain
 
+from . import parts
 from .log import change_mark
 from .steps import digest, tool_outcome, user_signal
 
@@ -71,11 +72,15 @@ def topics(messages):
     return found
 
 
-def evidence_summary(items):
+def evidence_summary(items, load=None):
+    """load: the stored step of one item (a store keeps repeated parts once,
+    parts.py); plain JSON payloads otherwise."""
     conversations, topic_counts = {}, Counter()
     fixes, corrections, successes, topic_events = set(), set(), set(), set()
     for row in items:
-        step = json.loads(row["payload"])
+        step = load(row) if load else json.loads(row["payload"])
+        if step is None:
+            continue
         conversation = row["conversation"]
         context = step.get("context") or []
         first = next((message_text(m) for m in context if m.get("role") == "user"), "")
@@ -191,11 +196,12 @@ def _summaries(store, models, nights, scoreboard):
             in {r[1] for r in db.execute("PRAGMA table_info(exchanges)")}
             else "e.created"
         )
+        refs = "s.refs" if parts.has_refs(db, "steps") else "NULL"
         items = (
             [
                 dict(r)
                 for r in db.execute(
-                    "SELECT s.payload,s.conversation,s.signal,e.created,"
+                    f"SELECT s.payload,{refs} AS refs,s.conversation,s.signal,e.created,"
                     f"{recorded_at} AS recorded_at FROM steps s "
                     "JOIN exchanges e ON e.id=json_extract(s.payload,'$.source_id') "
                     "WHERE s.retired_at IS NULL ORDER BY e.created,s.id"
@@ -205,7 +211,15 @@ def _summaries(store, models, nights, scoreboard):
             else []
         )
     primary = store.get("primary_model")
-    result = {}
+    result, cache = {}, {}
+
+    def load(row):
+        with store.connect() as db:
+            try:
+                return parts.payload(db, row, cache)
+            except LookupError:
+                return None  # deleted since it was listed (an old recording)
+
     for model in models:
         level = model.get("learning_level", "off")
         cutoff = model.get("learning_cutoff")
@@ -220,7 +234,7 @@ def _summaries(store, models, nights, scoreboard):
                 and item["recorded_at"] > cutoff
             ]
         )
-        summary = evidence_summary(eligible)
+        summary = evidence_summary(eligible, load)
         model_id = model["id"]
         scoped_nights = [
             n for n in nights if (n.get("model_id") or primary) == model_id

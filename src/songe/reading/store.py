@@ -59,6 +59,8 @@ def forget_vanished(store):
     Returns how many sessions were dropped."""
     with store.connect() as db:
         alive = set(timeline.sessions(db))
+        # Deleted for the size limit after being learned from: not vanished.
+        alive |= {r[0] for r in db.execute("SELECT session FROM pruned_sessions")}
         gone = [
             r[0] for r in db.execute(
                 "SELECT session FROM read_sessions WHERE model_id=?", (store.model_id,)

@@ -81,6 +81,17 @@ def model_scope(store, model):
     return store.scoped(row["id"] if row else model)
 
 
+def recordings_note(config, store):
+    """A plain note when the recordings are over their size limit: what is
+    over it has not been learned from yet, so it is kept (recordings.py)."""
+    from .recordings import over_limit
+    from .wording import recordings_note as note
+
+    path = getattr(store, "path", None)
+    over = over_limit(config, store) if path is not None and path.exists() else None
+    return note(*over) if over else None
+
+
 def restoring(store):
     """A version being rebuilt for a return: which one and how far along."""
     current = store.get("restoring")
@@ -269,6 +280,7 @@ def snapshot(config, store, scheduler=None, *, live=False, release=None, lean=Fa
             version=release["service_version"] if live else None,
             token=release["service_install"] if live else None,
         ),
+        "recordings_note": recordings_note(config, store),
         "model": config.public_model
         if config.model
         else "models"

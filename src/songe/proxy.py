@@ -1,10 +1,12 @@
 import asyncio
+import functools
 import hashlib
 import json
 import logging
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -266,6 +268,11 @@ def create_app(config=None, store=None, client=None, scheduler=None):
         limits=httpx.Limits(max_connections=128, max_keepalive_connections=32),
     )
     tasks = set()
+    # Recordings get their own thread: a write waiting on the database lock
+    # (Store.record retries for up to a minute) must not take the shared
+    # default pool the request path uses (registry.observe, lesson pins).
+    # One thread also keeps recordings in arrival order.
+    recorder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="songe-record")
     refresh_task = None
     refresh_revision = 0
     pending_bytes = 0
@@ -311,7 +318,9 @@ def create_app(config=None, store=None, client=None, scheduler=None):
         async def save():
             nonlocal pending_bytes
             try:
-                await asyncio.to_thread(store.record, *args)
+                await asyncio.get_running_loop().run_in_executor(
+                    recorder, functools.partial(store.record, *args)
+                )
                 queue_refresh()
             except Exception:
                 # Keep the cause: a full disk and a broken store look alike otherwise.
@@ -339,6 +348,7 @@ def create_app(config=None, store=None, client=None, scheduler=None):
         finally:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            recorder.shutdown(wait=False)
             if refresh_task:
                 await asyncio.gather(refresh_task, return_exceptions=True)
             if scheduler:

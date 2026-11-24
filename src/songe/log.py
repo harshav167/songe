@@ -1,6 +1,7 @@
 """Versioned SQLite store. Never stores transport headers or bearer tokens."""
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -10,16 +11,30 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import parts
 from .steps import digest
 from .storage import private_dir
+
+# 3: repeated parts of recorded requests and steps stored once (parts.py).
+SCHEMA_VERSION = 3
+# Tries of one recording while another writer holds the database, each
+# waiting the connection timeout (5 s): a minute covers giving back the space
+# of a store at its size limit.
+RECORD_ATTEMPTS = 12
 
 _CONNECTIONS = threading.local()
 _CACHED_PER_THREAD = 4
 
 
 def _open(path):
+    new = not os.path.exists(path) or os.path.getsize(path) == 0
     db = sqlite3.connect(path, timeout=5)
     db.row_factory = sqlite3.Row
+    if new:
+        # A new store gives freed space back in small steps
+        # (recordings.compact); SQLite allows choosing this only before the
+        # write-ahead log and the first table.
+        db.execute("PRAGMA auto_vacuum=INCREMENTAL")
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=FULL")
     return db
@@ -165,6 +180,9 @@ CREATE TABLE IF NOT EXISTS practice (
  id TEXT NOT NULL, model_id TEXT NOT NULL, signal_id TEXT NOT NULL,
  payload TEXT NOT NULL, kept INTEGER NOT NULL, "drop" TEXT, created REAL NOT NULL,
  PRIMARY KEY(id,model_id));
+-- Sessions whose recordings were deleted for the size limit after they were
+-- learned from (recordings.keep_under); their signals and practice stay.
+CREATE TABLE IF NOT EXISTS pruned_sessions (session TEXT PRIMARY KEY, at REAL NOT NULL);
 """
 
 
@@ -254,11 +272,15 @@ class Store:
         self.path = root / "experience.sqlite3"
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > SCHEMA_VERSION:
                 raise RuntimeError("Experience database was created by a newer Songe")
             db.executescript(SCHEMA)
             db.executescript(SCHEMA_V2)
             db.execute("BEGIN IMMEDIATE")
+            # v3: repeated parts of recordings are stored once (parts.py).
+            # Older rows stay plain JSON, which every reader still reads, until
+            # recordings.dedupe rewrites them in small resumable batches.
+            parts.install(db)
             columns = {r[1] for r in db.execute("PRAGMA table_info(exchanges)")}
             if "recorded_at" not in columns:
                 # Keep request-start timestamps for traffic history. Older
@@ -327,16 +349,16 @@ class Store:
             from .sleep.lessons import signal_counts
 
             for row in db.execute(
-                "SELECT id,payload FROM steps WHERE id NOT IN (SELECT step_id FROM step_signals)"
+                "SELECT * FROM steps WHERE id NOT IN (SELECT step_id FROM step_signals)"
             ):
                 db.execute(
                     "INSERT INTO step_signals VALUES (?,?)",
                     (
                         row["id"],
-                        json.dumps(signal_counts([json.loads(row["payload"])])),
+                        json.dumps(signal_counts([parts.payload(db, row)])),
                     ),
                 )
-            db.execute("PRAGMA user_version=2")
+            db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             if not db.execute(
                 "SELECT 1 FROM state WHERE key='grouped_by_instruction'"
             ).fetchone():
@@ -443,6 +465,18 @@ class Store:
         binding="",
         started=None,
     ):
+        # Giving space back (recordings.compact) can hold the write lock
+        # longer than one connection timeout; a recording waits for it (in
+        # the recording thread, never on the request path) instead of
+        # being lost.
+        for attempt in range(RECORD_ATTEMPTS):
+            try:
+                return self._record(path, request, response, status, complete, binding, started)
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or attempt == RECORD_ATTEMPTS - 1:
+                    raise
+
+    def _record(self, path, request, response, status, complete, binding, started):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             cutoff = db.execute(
@@ -450,17 +484,29 @@ class Store:
             ).fetchone()
             if started is not None and cutoff and started < json.loads(cutoff[0]):
                 return None
+            # Hashing and sharing happen here, in the recording thread, never
+            # on the request path.
+            skeleton, refs = parts.pack(db, request, parts.REQUEST_LISTS)
+            # An exchange id is never given out twice: watermarks and read
+            # signals refer to ids, and deleting the newest recordings (size
+            # limit, forget) would otherwise let SQLite hand them out again.
+            high = db.execute(
+                "SELECT value FROM state WHERE key='exchange_id_high'"
+            ).fetchone()
+            last = db.execute("SELECT MAX(id) FROM exchanges").fetchone()[0] or 0
             cur = db.execute(
-                "INSERT INTO exchanges(created,path,request,response,status,complete,binding,recorded_at) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO exchanges(id,created,path,request,response,status,complete,binding,recorded_at,refs) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
+                    max(last, json.loads(high[0]) if high else 0) + 1,
                     started if started is not None else time.time(),
                     path,
-                    json.dumps(request),
+                    skeleton,
                     json.dumps(response),
                     status,
                     complete,
                     binding,
                     time.time(),
+                    refs,
                 ),
             )
             messages = request.get("messages") if isinstance(request, dict) else None
@@ -489,14 +535,17 @@ class Store:
             return cur.lastrowid
 
     def exchanges(self):
-        with self.connect() as db:
+        with self.connect() as db, parts.snapshot(db):
+            cache = {}
             return [
-                dict(r)
+                {k: v for k, v in dict(r).items() if k != "refs"}
                 | {
-                    "request": json.loads(r["request"]),
+                    "request": parts.request(db, r, cache),
                     "response": json.loads(r["response"]),
                 }
-                for r in db.execute("SELECT * FROM exchanges ORDER BY created,id")
+                for r in db.execute(
+                    "SELECT * FROM exchanges ORDER BY created,id"
+                ).fetchall()
             ]
 
     def version(self, key=None):
@@ -743,9 +792,17 @@ class Store:
                 "INSERT OR REPLACE INTO state VALUES ('forgotten_at',?)",
                 (json.dumps(time.time()),),
             )
+            # Later recordings take ids above every one deleted here.
+            db.execute(
+                "INSERT INTO state VALUES ('exchange_id_high',"
+                " (SELECT json(MAX(COALESCE(MAX(id),0), COALESCE((SELECT CAST(value AS INTEGER) FROM state WHERE key='exchange_id_high'),0))) FROM exchanges))"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+            )
             db.execute("DELETE FROM exchanges")
             db.execute("DELETE FROM pool")
             db.execute("DELETE FROM steps")
+            db.execute("DELETE FROM parts")
+            db.execute("DELETE FROM part_uses")
             db.execute("DELETE FROM scoreboard")
             db.execute("DELETE FROM prefixes")
             db.execute("DELETE FROM reconstructed")
@@ -761,6 +818,7 @@ class Store:
             db.execute("DELETE FROM signals")
             db.execute("DELETE FROM reading_cache")
             db.execute("DELETE FROM practice")
+            db.execute("DELETE FROM pruned_sessions")
             # Cycle records keep their counts; example text quotes the
             # conversations and goes (docs/CONTRACTS.md, Integration decisions).
             for night_id, raw in db.execute("SELECT id, record FROM nights").fetchall():
@@ -851,22 +909,33 @@ class Store:
             "INSERT OR REPLACE INTO step_signals VALUES (?,?)",
             (item["id"], json.dumps(signal_counts([item]))),
         )
+        old = db.execute("SELECT refs FROM steps WHERE id=?", (item["id"],)).fetchone()
+        payload, refs = parts.pack(db, item, parts.STEP_LISTS)
         db.execute(
-            "INSERT INTO steps VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET conversation=excluded.conversation,signal=excluded.signal,strength=excluded.strength,evidence=excluded.evidence,answer_hint=excluded.answer_hint,payload=excluded.payload",
+            "INSERT INTO steps(id,conversation,split,signal,strength,evidence,answer_hint,env_fingerprint,retired_at,retired_reason,payload,refs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET conversation=excluded.conversation,signal=excluded.signal,strength=excluded.strength,evidence=excluded.evidence,answer_hint=excluded.answer_hint,payload=excluded.payload,refs=excluded.refs",
             (
                 item["id"],
                 item.get("conversation", item["id"]),
                 item.get("split", "train"),
                 item.get("signal"),
                 item.get("strength", 0),
-                json.dumps(item.get("evidence") or []),
+                # The evidence messages are the payload's "evidence", stored
+                # once (parts.py); this column stays empty from schema v3. No
+                # reader used it, and a second copy of a looping session's
+                # evidence grew as its square (issue #73).
+                "[]",
                 json.dumps(item.get("answer_hint")),
                 item.get("env_fingerprint", ""),
                 item.get("retired_at"),
                 item.get("retired_reason"),
-                json.dumps(item),
+                payload,
+                refs,
             ),
         )
+        if old and old[0]:
+            # Parts only the replaced payload used (a hindsight that grew
+            # keeps them all; a changed one frees some).
+            parts.collect(db, parts.ids_of(old[0]))
 
     def sync_steps(self, steps):
         """Retire evidence only when a tool it actually used changes schema.
@@ -902,10 +971,11 @@ class Store:
                             self.model_id,
                         ),
                     )
+            cache = {}
             for row in db.execute(
-                "SELECT id,payload FROM steps WHERE retired_at IS NULL"
+                "SELECT * FROM steps WHERE retired_at IS NULL"
             ).fetchall():
-                item = json.loads(row["payload"])
+                item = parts.payload(db, row, cache)
                 if (
                     item.get("conversation") in conversation_env
                     and conversation_env[item["conversation"]]
@@ -1009,21 +1079,25 @@ class Store:
             return found
 
     def active_steps(self, split=None):
-        with self.connect() as db:
+        with self.connect() as db, parts.snapshot(db):
             eligible, params = self._learning_filter(db)
             rows = db.execute(
-                "SELECT s.payload FROM steps s WHERE s.retired_at IS NULL AND "
+                "SELECT s.* FROM steps s WHERE s.retired_at IS NULL AND "
                 + eligible
                 + (" AND s.split=?" if split else ""),
                 (*params, split) if split else params,
-            )
-            return [json.loads(row[0]) for row in rows]
+            ).fetchall()
+            cache = {}
+            return [parts.payload(db, row, cache) for row in rows]
 
     def reconstruct(self, public_model=None, batch=32):
         """Persist prefix progress one bounded request at a time, in a guarded child.
 
         Unresolved continuations remain retryable after a late parent commits.
         A restart repeats only unresolved/new rows, never the complete log.
+        A recording that cannot be read (a request the model server refused,
+        with messages that are not a list of messages; text that cannot be
+        encoded) is passed over for good, so the ones after it go on.
         """
         from .steps import Step, digest, extract, prefix_keys, unsummarised
 
@@ -1036,10 +1110,10 @@ class Store:
                 # "\n\n" before a tool call, echoed by pi as null; 22 turns
                 # stuck unresolved). Unresolved rows are retried below.
                 for step_id, root in db.execute("SELECT DISTINCT step_id, root FROM prefixes").fetchall():
-                    saved = db.execute("SELECT payload FROM steps WHERE id=?", (step_id,)).fetchone()
+                    saved = db.execute("SELECT * FROM steps WHERE id=?", (step_id,)).fetchone()
                     if not saved:
                         continue
-                    step = json.loads(saved[0])
+                    step = parts.payload(db, saved)
                     if step.get("context") is None or step.get("action") is None:
                         continue
                     db.execute("INSERT OR IGNORE INTO prefixes VALUES (?,?,?)",
@@ -1049,47 +1123,64 @@ class Store:
                 "SELECT e.* FROM exchanges e LEFT JOIN reconstructed r ON r.exchange_id=e.id WHERE r.exchange_id IS NULL OR r.resolved=0 ORDER BY r.exchange_id IS NOT NULL,e.created,e.id LIMIT ?",
                 (batch,),
             ).fetchall()
+            cache = {}
             for raw in rows:
-                row = dict(raw) | {
-                    "request": json.loads(raw["request"]),
-                    "response": json.loads(raw["response"]),
-                }
-                messages = (
-                    row["request"].get("messages", [])
-                    if isinstance(row["request"], dict)
-                    else []
-                )
-                prefixes, parents = {}, {}
-                bare = unsummarised(messages) or []
-                for key in [k for n in range(1, len(messages) + 1) for k in prefix_keys(messages[:n])] + [
-                    k for n in range(1, len(bare) + 1) for k in prefix_keys(bare[:n])
-                ]:
-                    link = db.execute(
-                        "SELECT step_id,root FROM prefixes WHERE hash=?", (key,)
-                    ).fetchone()
-                    if link:
-                        saved = db.execute(
-                            "SELECT payload FROM steps WHERE id=?", (link[0],)
-                        ).fetchone()
-                        if saved:
-                            prefixes[key] = (link[0], link[1])
-                            parents[link[0]] = Step.load(json.loads(saved[0]))
-                items = extract([row], public_model, prefixes=prefixes, steps=parents)
-                resolved = bool(items) or not any(
-                    m.get("role") == "assistant" for m in messages
-                )
-                if resolved:
-                    for item in items:
-                        self._put_step(db, item.dict())
-                    db.executemany(
-                        "INSERT OR REPLACE INTO prefixes VALUES (?,?,?)",
-                        [(key, *link) for key, link in prefixes.items()],
+                turned = False
+                db.execute("SAVEPOINT recording")
+                try:
+                    row = dict(raw) | {
+                        "request": parts.request(db, raw, cache),
+                        "response": json.loads(raw["response"]),
+                    }
+                    messages = (
+                        row["request"].get("messages", [])
+                        if isinstance(row["request"], dict)
+                        else []
                     )
-                    changed += 1
-                db.execute(
-                    "INSERT OR REPLACE INTO reconstructed VALUES (?,?)",
-                    (row["id"], int(resolved)),
-                )
+                    prefixes, parents = {}, {}
+                    bare = unsummarised(messages) or []
+                    for key in [k for n in range(1, len(messages) + 1) for k in prefix_keys(messages[:n])] + [
+                        k for n in range(1, len(bare) + 1) for k in prefix_keys(bare[:n])
+                    ]:
+                        link = db.execute(
+                            "SELECT step_id,root FROM prefixes WHERE hash=?", (key,)
+                        ).fetchone()
+                        if link:
+                            saved = db.execute(
+                                "SELECT * FROM steps WHERE id=?", (link[0],)
+                            ).fetchone()
+                            if saved:
+                                prefixes[key] = (link[0], link[1])
+                                parents[link[0]] = Step.load(parts.payload(db, saved, cache))
+                    items = extract([row], public_model, prefixes=prefixes, steps=parents)
+                    resolved = bool(items) or not any(
+                        m.get("role") == "assistant" for m in messages
+                    )
+                    if resolved:
+                        for item in items:
+                            self._put_step(db, item.dict())
+                        db.executemany(
+                            "INSERT OR REPLACE INTO prefixes VALUES (?,?,?)",
+                            [(key, *link) for key, link in prefixes.items()],
+                        )
+                        turned = True
+                    db.execute(
+                        "INSERT OR REPLACE INTO reconstructed VALUES (?,?)",
+                        (row["id"], int(resolved)),
+                    )
+                except (TypeError, AttributeError, ValueError, KeyError, IndexError):
+                    # Left as recorded and never tried again: one recording
+                    # must not hold back every one made after it.
+                    db.execute("ROLLBACK TO recording")
+                    logging.getLogger("songe").warning(
+                        "reconstruct_unreadable %s", raw["id"], exc_info=True
+                    )
+                    db.execute(
+                        "INSERT OR REPLACE INTO reconstructed VALUES (?,1)", (raw["id"],)
+                    )
+                    turned = False
+                db.execute("RELEASE recording")
+                changed += turned
             if changed:
                 db.execute(
                     "INSERT OR REPLACE INTO state VALUES ('experience_revision',?)",
@@ -1288,11 +1379,11 @@ class Store:
             )
             for step_id in step_ids:
                 row = db.execute(
-                    "SELECT payload FROM steps WHERE id=?", (step_id,)
+                    "SELECT * FROM steps WHERE id=?", (step_id,)
                 ).fetchone()
                 if not row:
                     continue
-                step = Step.load(json.loads(row[0]))
+                step = Step.load(parts.payload(db, row))
                 step.signal, step.strength, step.evidence, step.answer_hint = (
                     signal_for(step)
                 )
@@ -1469,10 +1560,11 @@ class Store:
                 error_key TEXT, call_valid INTEGER, drift REAL)""")
             # Stream payloads: even a one-time upgrade never builds an entire
             # exchange log in the serving process. This method runs in a child.
+            cache = {}
             for saved in db.execute(
-                "SELECT payload FROM steps JOIN metric_dirty ON step_id=steps.id WHERE retired_at IS NULL"
+                "SELECT steps.* FROM steps JOIN metric_dirty ON step_id=steps.id WHERE retired_at IS NULL"
             ):
-                step = json.loads(saved[0])
+                step = parts.payload(db, saved, cache)
                 source = db.execute(
                     "SELECT created,binding,response FROM exchanges WHERE id=?",
                     (step["source_id"],),

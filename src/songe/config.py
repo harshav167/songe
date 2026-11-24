@@ -1,5 +1,6 @@
 import json
 import tomllib
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from urllib.parse import urlparse
@@ -69,6 +70,12 @@ class Config:
     # Deep Dream (practice, training, checks) starts on its own only after
     # this much quiet, until gap prediction decides it; Dream starts one now.
     deep_quiet_seconds: float = 1200.0
+    # Most space the recorded conversations may use, in GB (issue #73). Over
+    # it, the oldest recordings already learned from are deleted; ones not
+    # learned from yet are always kept (songe doctor says when that leaves
+    # the recordings over the limit). With repeated prompts stored once, a
+    # 200-request agent session with a 13k-token prompt takes about 4 MB.
+    recordings_limit_gb: float = 2.0
     # Before/after examples (docs/CONTRACTS.md): at most this many per set
     # (original moments, held-out practice), and this many trained scenes,
     # so the check stage stays a few minutes on a laptop.
@@ -151,6 +158,11 @@ class Config:
 
     @classmethod
     def load(cls, root: Path | None = None):
+        return cls.load_with_keys(root)[0]
+
+    @classmethod
+    def load_with_keys(cls, root: Path | None = None):
+        """Resolve installation settings and return the keys used after migration."""
         path = data_dir(root) / "config.toml"
         data = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         # Retired in schema v2; older installations may still have saved it.
@@ -229,7 +241,7 @@ class Config:
                 data["wake_scales"] = cls.wake_scales
         config = cls(**data)
         config.validate()
-        return config
+        return config, frozenset(data)
 
     @classmethod
     def for_model(cls, root, model):
@@ -327,6 +339,7 @@ class Config:
         if any(not 0 < v <= 1 for v in self.wake_scales) or not self.wake_scales:
             raise ValueError("Wake scales must be in (0, 1]")
         for key in (
+            "recordings_limit_gb",
             "idle_default_seconds",
             "slice_default_seconds",
             "slice_max_seconds",
@@ -393,6 +406,23 @@ TRAINING_KEYS = (
     "min_heldout", "min_drift", "general_drift_limit", "gate_confidence",
     "repetition_ngram", "wake_scales",
 )
+
+
+def training_setting_sources(installation_keys, model_keys):
+    return (
+        dict.fromkeys(TRAINING_KEYS, "default")
+        | dict.fromkeys(installation_keys, "installation")
+        | dict.fromkeys(model_keys, "per-model")
+    )
+
+
+def training_settings_snapshot(config, sources=None):
+    """Capture the resolved policy and its origin when loaded from disk."""
+    sources = sources or {}
+    return {
+        key: {"value": deepcopy(getattr(config, key)), "source": sources.get(key)}
+        for key in TRAINING_KEYS
+    }
 
 
 def training_fingerprint(config):

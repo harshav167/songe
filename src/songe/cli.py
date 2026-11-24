@@ -88,7 +88,14 @@ def parser():
     seed.add_argument(
         "--apply", action="store_true", help="Write matches (default is preview only)"
     )
-    commands.add_parser("status", help="What Songe is doing")
+    current_status = commands.add_parser("status", help="What Songe is doing")
+    current_status.add_argument(
+        "--training",
+        nargs="?",
+        const="",
+        metavar="MODEL",
+        help="Show the resolved training settings for a model (default: primary model)",
+    )
     models = commands.add_parser("models", help="List models · auto-dream on|off")
     models.add_argument("model", nargs="?")
     models.add_argument("level", nargs="?", choices=("on", "off"))
@@ -146,7 +153,11 @@ def service_manager(args):
 
 
 def service_fact(args):
-    return "starts at login" if service_manager(args) else f"none · start it with {NAME} serve"
+    return (
+        "starts at login"
+        if service_manager(args)
+        else f"none · start it with {NAME} serve"
+    )
 
 
 def detect_agent_binding(home=None):
@@ -291,7 +302,13 @@ def initialize(args, root):
 
         try:
             catalog_refs = registry.discover(config)
-        except (OSError, ValueError, KeyError, httpx.HTTPError, subprocess.SubprocessError):
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            httpx.HTTPError,
+            subprocess.SubprocessError,
+        ):
             catalog_refs = []
     else:
         for name in [requested] if requested else defaults:
@@ -406,8 +423,13 @@ def initialize(args, root):
                     registry.register(config, existing, model)
                 agents.migrate(config, root, update_agents=False)
                 finish_initialization(
-                    config, args, root, changes,
-                    lambda: agents.proposed(config, default=default_choice(args), root=root),
+                    config,
+                    args,
+                    root,
+                    changes,
+                    lambda: agents.proposed(
+                        config, default=default_choice(args), root=root
+                    ),
                 )
                 return
         detail = "".join(f"\n  {line}" for line in skipped)
@@ -543,15 +565,19 @@ def initialize(args, root):
     # a first init creates nothing until then (#72).
     existing = Store(root) if (root / "experience.sqlite3").exists() else None
     bound = Config.load(root)
-    if existing and (existing.version() or existing.nights()) and (
-        bound.upstream_url != config.upstream_url
-        or bound.public_model != config.public_model
-        or bound.upstream != config.upstream
-        or (bound.model_ref and bound.model_ref != config.model_ref)
-        or (
-            args.model
-            and bound.model
-            and str(ref.path) not in {bound.model, bound.model_ref.get("path")}
+    if (
+        existing
+        and (existing.version() or existing.nights())
+        and (
+            bound.upstream_url != config.upstream_url
+            or bound.public_model != config.public_model
+            or bound.upstream != config.upstream
+            or (bound.model_ref and bound.model_ref != config.model_ref)
+            or (
+                args.model
+                and bound.model
+                and str(ref.path) not in {bound.model, bound.model_ref.get("path")}
+            )
         )
     ):
         raise ValueError(
@@ -719,8 +745,13 @@ def initialize(args, root):
     # Recording starts now; the scheduler measures this machine in the first
     # idle gap, under the same memory, battery and traffic rules as training.
     finish_initialization(
-        config, args, root, changes,
-        lambda: agents.proposed(config, default=default_choice(args), opencode_v2=v2, root=root),
+        config,
+        args,
+        root,
+        changes,
+        lambda: agents.proposed(
+            config, default=default_choice(args), opencode_v2=v2, root=root
+        ),
     )
 
 
@@ -753,7 +784,10 @@ def preenable_model(args, root, config, ref, refs):
             registry.register(config, store, found.serving_id, found)
     registry.set_learning(store, ref.serving_id, "new")
     finish_initialization(
-        config, args, root, changes,
+        config,
+        args,
+        root,
+        changes,
         lambda: agents.proposed(proposal, default=default_choice(args), root=root),
     )
 
@@ -800,12 +834,16 @@ def finish_initialization(config, args, root, changes, repropose=None):
     # the file holds now; a file nobody touched keeps its reviewed proposal.
     if repropose is not None:
         moved = {
-            path for path, original, *_ in changes
+            path
+            for path, original, *_ in changes
             if (path.read_bytes() if path.exists() else None) != original
         }
         if moved:
             fresh = {change[0]: change for change in repropose()}
-            changes = [fresh.get(change[0], change) if change[0] in moved else change for change in changes]
+            changes = [
+                fresh.get(change[0], change) if change[0] in moved else change
+                for change in changes
+            ]
     # The newly started service can already have migrated its owned entries.
     changes = [
         change
@@ -824,7 +862,11 @@ def finish_initialization(config, args, root, changes, repropose=None):
     console().print()
     console().print(next_step(config))
     facts(
-        ([] if managed else [(f"{NAME} serve", "start Songe · no service manager here")])
+        (
+            []
+            if managed
+            else [(f"{NAME} serve", "start Songe · no service manager here")]
+        )
         + [
             (f"{NAME} open", "dashboard"),
             (f"{NAME} status", "what it is doing"),
@@ -852,7 +894,9 @@ def missing_agents(config):
         if agent not in installed
     ]
     if not installed:
-        rows.append(("Other", f"any OpenAI-compatible tool · http://127.0.0.1:{config.port}/v1"))
+        rows.append(
+            ("Other", f"any OpenAI-compatible tool · http://127.0.0.1:{config.port}/v1")
+        )
     return rows
 
 
@@ -922,6 +966,9 @@ def main(argv=None):
     args = parser().parse_args(argv)
     root = args.data_dir.expanduser().resolve()
     try:
+        if args.command == "status" and args.training is not None:
+            print_training_status(root, args.training)
+            return 0
         config = Config.load(root)
         command = args.command
         if command == "omp-backfill":
@@ -942,9 +989,7 @@ def main(argv=None):
                     " · choose an empty or new --data-dir"
                 )
         # Init creates its data only once the user accepts (#72).
-        if command in {"serve", "uninstall"} or (
-            command == "sleep" and args.dry_run
-        ):
+        if command in {"serve", "uninstall"} or (command == "sleep" and args.dry_run):
             store = Store(private_dir(root))
         if command == "init":
             initialize(args, root)
@@ -1173,6 +1218,36 @@ def print_status(data):
     status(data)
 
 
+def print_training_status(root, model):
+    from .api import ReadOnlyStore
+    from .config import training_setting_sources, training_settings_snapshot
+    from .models.registry import entries, model_config_with_keys
+    from .terminal import training_settings
+
+    config, installation_keys = Config.load_with_keys(root)
+    store = ReadOnlyStore(root)
+    registered = [row["id"] for row in entries(store)]
+    model_keys, ignored = (), ()
+    if registered:
+        primary = store.get("primary_model")
+        model = model or (primary if primary in registered else registered[0])
+        config, model_keys, ignored = model_config_with_keys(config, store, model)
+    elif model:
+        raise ValueError(f"Unknown model: {model}")
+
+    settings = training_settings_snapshot(
+        config, training_setting_sources(installation_keys, model_keys)
+    )
+    training_settings(
+        config.public_model if config.model_key or config.model else None,
+        (
+            (key, setting["value"], setting["source"])
+            for key, setting in settings.items()
+        ),
+        ignored,
+    )
+
+
 def measured_hardware():
     from .platform import current
 
@@ -1367,4 +1442,23 @@ def doctor(config, root, local):
             )
     except OSError as exc:
         print(f"Data disk: unavailable · {root} · {exc}")
+    line = recordings_line(config, root)
+    if line:
+        print(line)
     return problems
+
+
+def recordings_line(config, root):
+    """How much the recorded conversations use, against their limit
+    (recordings_limit_gb); read without changing the store."""
+    from .api import ReadOnlyStore
+    from .recordings import limit_bytes, sizes
+    from .wording import recordings_line as line
+
+    if not (root / "experience.sqlite3").exists():
+        return None
+    try:
+        used = sizes(ReadOnlyStore(root))[0]
+    except sqlite3.Error:
+        return None
+    return line(used, limit_bytes(config))

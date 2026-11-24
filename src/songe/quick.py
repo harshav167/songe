@@ -21,16 +21,23 @@ Lesson: {"id", "text", "signals": [signal ids], "added_at", "count"}
 
 import re
 import time
+import unicodedata
 
 from .reading import store as reading
-from .reading.rules import DEICTIC, RULE_START, SENTENCES, rule_sentence  # noqa: F401
+from .reading.rules import (  # noqa: F401
+    DEICTIC,
+    RULE_START,
+    SENTENCES,
+    rule_sentence,
+    stated_sentence,
+)
 from .steps import digest
 
 KEY = "prompt_lessons"
 USER = {"correction", "retry", "approval"}
 LESSON_CHARS = 300
 SIMILAR = 0.5  # word overlap (Jaccard) at which two lessons are one
-WORDS = re.compile(r"[a-z0-9]+")
+WORDS = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff]|[^\W_]+")
 COMMON = {
     "the", "a", "an", "to", "of", "and", "or", "in", "on", "for", "with", "is",
     "it", "that", "this", "be", "as", "when", "if", "you", "your", "use", "by",
@@ -43,6 +50,14 @@ BLOCK = (
 )
 
 
+def _tokens(text):
+    """Unicode word tokens (splitting CJK ideographs/kana so no-space scripts
+    still match, and stripping combining marks/tatweel so Arabic words stay intact)."""
+    norm = unicodedata.normalize("NFKC", str(text).lower())
+    cleaned = "".join(ch for ch in norm if unicodedata.category(ch) != "Mn" and ch != "\u0640")
+    return WORDS.findall(cleaned)
+
+
 def stem(word):
     """A rough stem, so "valid"/"validity", "runs"/"running" count as one."""
     for suffix in ("ations", "ation", "ities", "ity", "ings", "ing", "ies", "ed", "es", "ly", "s"):
@@ -52,14 +67,14 @@ def stem(word):
 
 
 def words(text):
-    return {stem(w) for w in WORDS.findall(text.lower()) if w not in COMMON}
+    return {stem(w) for w in _tokens(text) if w not in COMMON}
 
 
 def normal(text):
     """For telling two sentences are the same one: lower case, words only, a
     leading "please" ignored."""
-    words = WORDS.findall(str(text).lower())
-    return " ".join(words[1:] if words[:1] == ["please"] else words)
+    tokens = _tokens(text)
+    return " ".join(tokens[1:] if tokens[:1] == ["please"] else tokens)
 
 
 def similar(a, b):
@@ -81,7 +96,13 @@ def suitable(signal):
     words (a sentence of theirs shaped like a rule). Other feedback (a
     reaction in a game, a one-off correction) waits for Deep Dream."""
     lesson = (signal.get("lesson") or "").strip()
-    if not lesson or signal.get("generality") == "task":
+    if not lesson:
+        return False
+    if signal.get("preference"):
+        # A preference of the user's own, in their words: it holds whatever
+        # the lesson written beside it was read as.
+        return stated_sentence(signal) is not None
+    if signal.get("generality") == "task":
         return False
     if signal.get("from") == "rules" and signal.get("source") == "user":
         # A stated rule captured by an older Songe is checked again by today's
@@ -100,7 +121,7 @@ def candidates(store, limit, min_sessions=2):
     clusters = []
     # Newest first: a cluster is named by its most recent wording.
     for s in sorted(signals, key=lambda s: s.get("revision") or 0, reverse=True):
-        rule = rule_sentence(s.get("text")) if s.get("type") in USER else None
+        rule = stated_sentence(s) if s.get("type") in USER else None
         # The short form reading wrote for the prompt, when it has one (signals
         # read before it existed fall back to the lesson, trimmed by tidy).
         text = rule or short_of(s) or s["lesson"].strip()
@@ -154,7 +175,10 @@ CONSOLIDATE_SCHEMA = {
     },
     "required": ["lessons"],
 }
-PROMPT_CHARS = 600  # about 150 tokens for the whole list, on every request
+# About 300 tokens for the whole list, on every request. At 600 characters ten
+# sentences in a user's own words (about 60 to 90 characters each) did not
+# fit: on average 7.9 of 10 did.
+PROMPT_CHARS = 1200
 # The model repeating its instruction instead of writing one ("Merge lessons
 # 1, 2, 4 into one instruction: …").
 ECHO = re.compile(r"\blessons?\b|\b(merge|combine)\b|\b\d+\s*,\s*\d+", re.I)
@@ -291,7 +315,7 @@ def user_rule(by_id, signal_ids):
     The most recent such sentence, or None."""
     for sid in signal_ids:
         s = by_id.get(sid) or {}
-        if s.get("type") in USER and (sentence := rule_sentence(s.get("text"))):
+        if s.get("type") in USER and (sentence := stated_sentence(s)):
             return sentence
     return None
 
@@ -313,7 +337,11 @@ def split(store, clusters):
         if ECHO.search(lesson["text"]):
             return False
         if lesson.get("rule"):
-            return rule_sentence(lesson["text"]) == lesson["text"]
+            # The user's own sentence: a standing rule, or a preference of
+            # theirs that one of its signals still holds.
+            return rule_sentence(lesson["text"]) == lesson["text"] or any(
+                stated_sentence(by_id[sid]) == lesson["text"] for sid in lesson["signals"] if sid in by_id
+            )
         return any(suitable(by_id[sid]) for sid in lesson["signals"] if sid in by_id)
 
     published = [dict(lesson, signals=list(lesson["signals"])) for lesson in active(store) if still_belongs(lesson)]
@@ -360,7 +388,7 @@ def quick_dream(store, config, now=None, merged=None, kept=None):
     # One lesson per sentence: the same text twice is one lesson.
     unique = {}
     for lesson in pool:
-        key = normal(lesson["text"])
+        key = normal(lesson["text"]) or " ".join(lesson["text"].split()).lower()
         if key in unique:
             first = unique[key]
             first["signals"] = list(dict.fromkeys(first["signals"] + lesson["signals"]))
@@ -475,9 +503,13 @@ def undo(store, entry_id):
     entry = next((e for e in history if e["id"] == entry_id), None)
     if entry is None:
         raise ValueError("Unknown Quick Dream")
-    added = {normal(t) for t in entry.get("added") or []}
+    added = {normal(t) or " ".join(str(t).split()).lower() for t in entry.get("added") or []}
     current = state(store)
-    gone = [lesson for lesson in current["lessons"] if normal(lesson["text"]) in added]
+    gone = [
+        lesson
+        for lesson in current["lessons"]
+        if (normal(lesson["text"]) or " ".join(str(lesson["text"]).split()).lower()) in added
+    ]
     if gone:
         store.set(KEY, current | {
             "lessons": [lesson for lesson in current["lessons"] if lesson not in gone],
@@ -544,8 +576,6 @@ def moment(store, lesson):
     """Where a lesson mattered: the logged request at the step the agent got
     wrong, or (for a rule the user stated) the last request before their
     message. Returns {"request", "asked", "feedback"} or None."""
-    import json as _json
-
     from .reading import timeline
 
     by_id = {s["id"]: s for s in reading.signals(store)}
@@ -563,9 +593,10 @@ def moment(store, lesson):
                 exchange = reacted_to(items[: s["item"]], s.get("text") or "")
         if exchange is None:
             continue
+        from .parts import request_of
+
         with store.connect() as db:
-            row = db.execute("SELECT request FROM exchanges WHERE id=?", (exchange,)).fetchone()
-        request = _json.loads(row[0]) if row else None
+            request = request_of(db, exchange)
         if not isinstance(request, dict) or not request.get("messages"):
             continue
         from .steps import CONTINUED

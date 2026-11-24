@@ -12,14 +12,21 @@ from dataclasses import replace
 from pathlib import Path
 from statistics import mean
 
-from ..artifacts.storage import StorageWait
+from ..artifacts.storage import StorageWait, admit_storage, artifact_roots
 from ..backends import Interrupted, choose
-from ..config import Config, data_dir
+from ..config import (
+    Config,
+    data_dir,
+    training_fingerprint,
+    training_setting_sources,
+    training_settings_snapshot,
+)
 from ..log import Store
 from ..platform import Rooted, current, power_status
 from ..platform.locking import acquire
 from ..schedule import (
     base_fingerprint,
+    pending_export,
     probe,
     rebuild_key,
     rebuild_pending,
@@ -132,7 +139,7 @@ class Journal:
             )
 
     def unit(self, name, fn):
-        path = self.root / (name + ".json")
+        path = self.path(name)  # where commit writes it
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         self.check()
@@ -146,9 +153,36 @@ class Journal:
         return self.unit(name, lambda: fn(lambda: self.check(False)))
 
 
-def run(config, store, slice_seconds=None, sizing=None):
+def verify_work(work, store, night):
+    marker = work / "songe_work.json"
+    if (
+        work.is_symlink()
+        or not any(
+            work.parent.resolve() == (root / "versions").resolve()
+            for root in artifact_roots(store.root)
+        )
+        or work.exists()
+        and (
+            not marker.is_file()
+            or json.loads(marker.read_text(encoding="utf-8"))
+            != {"night": night, "installation_id": store.get("installation_id")}
+        )
+    ):
+        raise StorageWait(f"Learning work is unavailable or no longer owned: {work}")
+
+
+def run(
+    config,
+    store,
+    slice_seconds=None,
+    sizing=None,
+    *,
+    export_only=False,
+    setting_sources=None,
+):
+    from ..memory import TrainingPlatform
     from ..practice.pool import drift_steps
-    from .evaluate import evaluate, references
+    from .evaluate import evaluate, references, sharpness
     from .fuse import candidate_kind, evaluation_model, export_candidate
     from .gate import Decision, choose_scale, decide
     from .prompts import OversizedStep, UnusableStep, paired_prompts
@@ -167,6 +201,7 @@ def run(config, store, slice_seconds=None, sizing=None):
         config, sizing, store.get("calibration"), store, slice_id
     )
     night, record, journal = None, {}, None
+    reason_key = "reason"
     power_platform = current()
     next_power_check = 0
     generation = store.get("candidate_generation")
@@ -220,6 +255,17 @@ def run(config, store, slice_seconds=None, sizing=None):
     def inner_check():
         check(include_deadline=False)
 
+    def export_scale(scale, kind, adapter, destination):
+        from .calibrate import admit_phase
+
+        def produce(urgent):
+            journal.phase = "fuse"
+            admit_phase(config, store, platform, "export")
+            export_candidate(config, kind, adapter, destination, platform, urgent)
+            return {"path": str(destination)}
+
+        journal.indivisible(f"fused-{scale}", produce)
+
     try:
         expected_seconds = (
             slice_seconds
@@ -228,6 +274,34 @@ def run(config, store, slice_seconds=None, sizing=None):
         )
         if power_status(power_platform).constrained(expected_seconds):
             raise Interrupted("battery low")
+        if pending := pending_export(config, store):
+            night, record = pending["id"], pending["record"]
+            reason_key = "export_wait"
+            work = Path(record["work"])
+            candidate = record["pending_export"]
+            adapter = Path(candidate["training_adapter"])
+            if not adapter.is_dir():
+                raise StorageWait(f"Saved adapter is unavailable: {adapter}")
+            verify_work(work, store, night)
+            admit_storage(config, store, power_platform, pending_export=candidate)
+            journal = Journal(work, check, store, slice_id)
+            journal.phase = "fuse"
+            platform = Rooted(TrainingPlatform(power_platform, config), store.root)
+            export_scale(
+                record["wake_scale"],
+                candidate["kind"],
+                adapter,
+                Path(candidate["artifact"]),
+            )
+            check(False)
+            result = record | {"candidate": candidate, "ended_at": time.time()}
+            del result["pending_export"]
+            result.pop("export_wait", None)
+            store.night(night, status="ready", phase="swap", progress=0.95, record=result)
+            print(json.dumps(result), flush=True)
+            return result
+        if export_only:
+            return {"reason": "No eligible adapter export to resume"}
         info, train_steps, heldout = preview(config, store)
         # Installations from before learning modes trained on real steps.
         if store.get("learning_mode", "hindsight") != config.learning:
@@ -260,8 +334,6 @@ def run(config, store, slice_seconds=None, sizing=None):
                 return info | {
                     "reason": "Waiting for memory: intact training samples deferred"
                 }
-        from ..config import training_fingerprint
-
         fingerprint = training_fingerprint(config)
         base = base_fingerprint(config)
         rebuild_attempt_key = rebuild_key(config, store)
@@ -309,8 +381,6 @@ def run(config, store, slice_seconds=None, sizing=None):
             or p.pressure == "critical"
         ):
             raise ValueError(f"Hardware policy does not permit training: {p.dict()}")
-        from ..memory import TrainingPlatform
-
         platform = Rooted(TrainingPlatform(current(), config), store.root)
         if {a.kind for a in platform.accelerators()} <= {"cpu"} and not (
             config.force_cpu_training or config.torch_options.get("force_cpu", False)
@@ -320,9 +390,7 @@ def run(config, store, slice_seconds=None, sizing=None):
             )
         kind = candidate_kind(config, platform)
         from ..artifacts.storage import (
-            admit_storage,
             artifact_root,
-            artifact_roots,
             volume,
         )
 
@@ -338,41 +406,15 @@ def run(config, store, slice_seconds=None, sizing=None):
                 # Retire it; its selected experience remains in the durable pool.
                 store.night(resumable["id"], status="discarded")
                 resumable = None
-        night = resumable["id"] if resumable else store.night(None)
-        record = resumable["record"] if resumable else {}
-        work = (
-            Path(record["work"])
-            if record.get("work")
-            else target / "versions" / f"night-{night}"
-        )
-        owned = {"night": night, "installation_id": store.get("installation_id")}
-        if (
-            work.is_symlink()
-            or not any(
-                work.parent.resolve() == (r / "versions").resolve()
-                for r in artifact_roots(store.root)
-            )
-            or work.exists()
-            and (
-                not (work / "songe_work.json").is_file()
-                or json.loads((work / "songe_work.json").read_text(encoding="utf-8"))
-                != owned
-            )
-        ):
-            raise StorageWait(
-                f"Learning work is unavailable or no longer owned: {work}"
-            )
-        private_dir(work)
-        write_json(
-            work / "songe_work.json",
-            {"night": night, "installation_id": store.get("installation_id")},
-        )
-        record = (
-            resumable["record"]
-            if resumable
-            else {
+        if resumable:
+            night, record = resumable["id"], resumable["record"]
+        else:
+            record = {
                 "expected": store.get("current"),
                 "configuration": fingerprint,
+                "training_settings": training_settings_snapshot(
+                    policy_config, setting_sources
+                ),
                 "base_fingerprint": base,
                 "environment": store.get("environment_fingerprint"),
                 "generation": store.get("candidate_generation"),
@@ -385,7 +427,16 @@ def run(config, store, slice_seconds=None, sizing=None):
                 "trigger": "dream" if store.get("requested_sleep", False) else "idle",
                 "started_at": time.time(),
             }
+            night = store.night(None, record=record)
+        work = (
+            Path(record["work"])
+            if record.get("work")
+            else target / "versions" / f"night-{night}"
         )
+        owned = {"night": night, "installation_id": store.get("installation_id")}
+        verify_work(work, store, night)
+        private_dir(work)
+        write_json(work / "songe_work.json", owned)
         record["work"] = str(work)
         store.night(night, status="running", record=record)
         if sizing:
@@ -903,6 +954,7 @@ def run(config, store, slice_seconds=None, sizing=None):
                 "drift": mean(cache["drift_set"]) if cache.get("drift_set") else None,
                 "count": len(rows),
                 "drift_count": len(cache.get("drift_set") or []),
+                **sharpness(cache),
             }
             return rows
 
@@ -979,16 +1031,7 @@ def run(config, store, slice_seconds=None, sizing=None):
             if kind == "mlx-adapter":
                 return Path(config.model)
             destination = scale_destination(scale)
-
-            def produce(urgent):
-                journal.phase = "fuse"
-                from .calibrate import admit_phase
-
-                admit_phase(config, store, platform, "export")
-                export_candidate(config, kind, adapter, destination, platform, urgent)
-                return {"path": str(destination)}
-
-            journal.indivisible(f"fused-{scale}", produce)
+            export_scale(scale, kind, adapter, destination)
             return destination
 
         def scale_destination(scale):
@@ -1042,6 +1085,7 @@ def run(config, store, slice_seconds=None, sizing=None):
                     "drift": mean(cache["drift_set"]) if cache.get("drift_set") else None,
                     "count": len(rows),
                     "drift_count": len(cache.get("drift_set") or []),
+                    **sharpness(cache),
                 }
                 record.setdefault("drift_checks", {}).setdefault(name, cache.get("drift_check"))
             return rows
@@ -1099,6 +1143,7 @@ def run(config, store, slice_seconds=None, sizing=None):
         )
         record["scale_evaluations"] = scales
         record["wake_scale"] = scale
+        defer_export = kind == "gguf-lora" and backend.kind == "mlx"
         if scale is None:
             last_measurement = next(reversed(scales.values()), {})
             decision = Decision(
@@ -1112,7 +1157,9 @@ def run(config, store, slice_seconds=None, sizing=None):
             artifact, adapter = work / "adapter", None
         else:
             adapter = scale_adapter(scale)
-            artifact = scale_artifact(scale, adapter)
+            artifact = (
+                scale_destination(scale) if defer_export else scale_artifact(scale, adapter)
+            )
             record["layer_deltas"] = backend.layer_deltas(baseline)
         if hasattr(backend, "teacher_gain"):
             store.set(
@@ -1229,7 +1276,7 @@ def run(config, store, slice_seconds=None, sizing=None):
         )
         if decision.accepted:
             version_id = f"night-{night}"
-            record["candidate"] = {
+            candidate = {
                 "id": version_id,
                 "identifier": f"{config.public_model}:{store.get('installation_id')}-{version_id}"
                 if config.upstream == "ollama"
@@ -1248,10 +1295,18 @@ def run(config, store, slice_seconds=None, sizing=None):
                 "created": time.time(),
                 "night": night,
             }
-            record["ended_at"] = time.time()
-            store.night(
-                night, status="ready", phase="swap", progress=0.95, record=record
-            )
+            if defer_export:
+                # The next worker exports after this process releases the MLX
+                # model. Keep the passed gate and its adapter as one checkpoint.
+                record["pending_export"] = candidate
+                store.night(
+                    night, status="interrupted", phase="fuse", progress=0.95, record=record
+                )
+            else:
+                record.update(candidate=candidate, ended_at=time.time())
+                store.night(
+                    night, status="ready", phase="swap", progress=0.95, record=record
+                )
         else:
             record["ended_at"] = time.time()
             store.night(
@@ -1269,13 +1324,13 @@ def run(config, store, slice_seconds=None, sizing=None):
     except StorageWait as exc:
         store.set("disk_wait", str(exc))
         if night is not None:
-            record["reason"] = str(exc)
+            record[reason_key] = str(exc)
             store.night(night, status="interrupted", record=record)
         return {"reason": str(exc)}
     except (Interrupted, OversizedStep) as exc:
         interrupted_by = interrupted_by or str(exc) or "activity"
         if night is not None:
-            record["reason"] = interrupted_by
+            record[reason_key] = interrupted_by
             store.night(night, status="interrupted", record=record)
         return {"interrupted": True}
     except BaseException as exc:
@@ -1290,7 +1345,7 @@ def run(config, store, slice_seconds=None, sizing=None):
             # Short memory is a wait, not a failure: the night keeps its work
             # and resumes when there is room.
             if night is not None:
-                record["reason"] = "Waiting for memory"
+                record[reason_key] = "Waiting for memory"
                 store.night(night, status="interrupted", record=record)
             raise
 
@@ -1299,10 +1354,14 @@ def run(config, store, slice_seconds=None, sizing=None):
             "learning_failed", extra={"diagnostic": True}
         )
         if night is not None:
-            record["reason"] = (
-                f"Work failed; served version preserved. Diagnostics: {store.root / 'songe.log'}"
-            )
-            store.night(night, status="failed", record=record)
+            if reason_key == "export_wait":
+                record["export_wait"] = "Export failed; served version preserved"
+                store.night(night, status="interrupted", record=record)
+            else:
+                record["reason"] = (
+                    f"Work failed; served version preserved. Diagnostics: {store.root / 'songe.log'}"
+                )
+                store.night(night, status="failed", record=record)
         raise
     finally:
         import logging
@@ -1355,12 +1414,16 @@ def isolated(config, store, *, dry_run=False, slice_seconds=None):
         argv += ["--slice-seconds", str(slice_seconds)]
     platform = None if dry_run else TrainingPlatform(current(), config)
     sizing = None
+    export_only = not dry_run and bool(pending_export(config, store))
+    if export_only:
+        argv += ["--export-only"]
+    measure = not dry_run and not export_only
 
     def observe(sample):
         history.observe(sample)
         store.set("memory_pressure_history", history.data)
 
-    if not dry_run:
+    if measure:
         from .calibrate import calibrate
         from .calibration_state import needs_growth
 
@@ -1370,7 +1433,7 @@ def isolated(config, store, *, dry_run=False, slice_seconds=None):
                 "reason": "Measuring training size",
                 "calibration": store.get("calibration_progress"),
             }
-    if not dry_run and config.calibration_available:
+    if measure and config.calibration_available:
         from .sizing import PressureHistory, choose_size, free_needed, waiting_reason
 
         sample = snapshot(platform)
@@ -1400,7 +1463,7 @@ def isolated(config, store, *, dry_run=False, slice_seconds=None):
             device_prediction_error_bytes=sizing["device_prediction_error_bytes"]
             if sizing
             else 0,
-            on_sample=observe if not dry_run and config.calibration_available else None,
+            on_sample=observe if measure and config.calibration_available else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1427,11 +1490,15 @@ def main():
     parser.add_argument("--slice-seconds", type=float)
     parser.add_argument("--sizing", type=json.loads)
     parser.add_argument("--child", action="store_true")
+    parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--model-key")
     args = parser.parse_args()
-    config, store = Config.load(args.data_dir), Store(args.data_dir)
+    config, installation_keys = Config.load_with_keys(args.data_dir)
+    store, model_keys = Store(args.data_dir), ()
     if args.model_key:
-        config = Config.for_model(args.data_dir, args.model_key)
+        from ..models.registry import model_config_with_keys
+
+        config, model_keys, _ = model_config_with_keys(config, store, args.model_key)
         store = store.scoped(args.model_key)
     from ..telemetry import configure
 
@@ -1446,7 +1513,14 @@ def main():
             )
         )
     elif args.child:
-        outcome = run(config, store, args.slice_seconds, args.sizing)
+        outcome = run(
+            config,
+            store,
+            args.slice_seconds,
+            args.sizing,
+            export_only=args.export_only,
+            setting_sources=training_setting_sources(installation_keys, model_keys),
+        )
         # Why a run ended (also one that never started a night): the
         # service reads it to carry a pressed Deep Dream on, or say why not.
         reason = outcome.get("reason") if isinstance(outcome, dict) else None
@@ -1471,9 +1545,14 @@ def main():
                     parked = await upstream.park(
                         on_snapshot=lambda items: store.set("parked_models", items)
                     )
+                exporting = pending_export(config, store) is not None
                 result = await asyncio.to_thread(
                     isolated, config, store, slice_seconds=args.slice_seconds
                 )
+                if not exporting and result.get("pending_export"):
+                    result = await asyncio.to_thread(
+                        isolated, config, store, slice_seconds=args.slice_seconds
+                    )
                 print(json.dumps(result))
             finally:
                 if upstream:
