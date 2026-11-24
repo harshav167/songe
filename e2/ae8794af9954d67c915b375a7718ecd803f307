@@ -1,0 +1,148 @@
+README.md
+  h_8b0c426ac9a924 12,50-59,153,189-190
+docs/CONTRACTS.md
+  h_8b0c426ac9a924 110-118,269-323,507-510,715-720,731-733
+docs/DEVELOPMENT.md
+  h_8b0c426ac9a924 54
+src/songe/agents/__init__.py
+  h_8b0c426ac9a924 256-268,281
+src/songe/api.py
+  h_8b0c426ac9a924 84-94,283
+src/songe/artifacts/storage.py
+  h_8b0c426ac9a924 365-384,386-391
+src/songe/backends/mlx.py
+  h_8b0c426ac9a924 371-377,380-391,394,405-411
+src/songe/backends/torch.py
+  h_8b0c426ac9a924 289-290,438-492,740-744,747-754,763-769,924-930,932-940,948-955,983-995
+src/songe/cli.py
+  h_8b0c426ac9a924 91-98,156-160,305-311,426-432,568-580,748-754,787-790,837-838,843-846,865-869,897-899,969-971,992,1221-1250,1445-1447,1449-1464
+src/songe/config.py
+  h_8b0c426ac9a924 3,73-78,161-165,244,342,411-427
+src/songe/experience.py
+  h_8b0c426ac9a924 16-20
+src/songe/flow.py
+  h_8b0c426ac9a924 10,64-73,103
+src/songe/learning_summary.py
+  h_8b0c426ac9a924 11,75-77,81-83,199,204,214-222,237
+src/songe/log.py
+  h_8b0c426ac9a924 4,14,18-24,30,33-37,183-185,275,280-283,352,358,361,468-479,487-496,498,500,503,509,538-539,541,543,546-548,795-800,804-805,821,912-913,915,922-926,931-932,935-938,974,976,978,1082,1085,1089-1091,1098-1100,1113,1116,1126,1128-1146,1148-1157,1159-1183,1382,1386,1563,1565,1567
+src/songe/memory.py
+  h_8b0c426ac9a924 481-494,684,686-692
+src/songe/models/registry.py
+  h_8b0c426ac9a924 79-83,87-92
+src/songe/parts.py
+  h_8b0c426ac9a924 1-258
+src/songe/platform/common.py
+  h_8b0c426ac9a924 3,29-53,68-74,81-82,87,113-118,122-125,196-201
+src/songe/practice/checks.py
+  h_8b0c426ac9a924 14-16,25,53-62,67,87-89,95-97,105-113,118,157-158,163,165,185-197
+src/songe/practice/frame.py
+  h_8b0c426ac9a924 31-34,245-246
+src/songe/practice/pool.py
+  h_8b0c426ac9a924 80-91,226,239-240
+src/songe/practice/prompts.py
+  h_8b0c426ac9a924 120-131
+src/songe/practice/store.py
+  h_8b0c426ac9a924 50,55,156-157,159,162,181
+src/songe/proxy.py
+  h_8b0c426ac9a924 2,9,271-275,321-323,351
+src/songe/quick.py
+  h_8b0c426ac9a924 24,27-33,40,53-60,70,76-77,99-105,124,178-181,318,340-344,391,506,508-512,596-597,599
+src/songe/reading/extract.py
+  h_8b0c426ac9a924 257-258,350-353,401-424,493-534
+src/songe/reading/prompts.py
+  h_8b0c426ac9a924 62-67,116,124,127-143,183,197-235,256-257
+src/songe/reading/rules.py
+  h_8b0c426ac9a924 29-31,47-48,76,185-195,200,232-315
+src/songe/reading/store.py
+  h_8b0c426ac9a924 62-63
+src/songe/reading/timeline.py
+  h_8b0c426ac9a924 17,219,223-232,243-244,246,313-326
+src/songe/reading/views.py
+  h_8b0c426ac9a924 12-13,25-43,97-98,101,105-107
+src/songe/recordings.py
+  h_8b0c426ac9a924 1-417
+src/songe/review.py
+  h_8b0c426ac9a924 18,77-89
+src/songe/schedule.py
+  h_8b0c426ac9a924 265-278,425,827,836,945-946,950-952,955,960,963,968,972,1015,1031,1044,1092,1095,1128,1172-1176,1178,2327-2332,2892-2915,2960
+src/songe/sleep/calibrate.py
+  h_8b0c426ac9a924 304,927-933,958,967-970
+src/songe/sleep/calibration_state.py
+  h_8b0c426ac9a924 10-18,25-37,72,75-82,85-86,211,213,227,235,252,356
+src/songe/sleep/evaluate.py
+  h_8b0c426ac9a924 231-265,312-315,319,322,325-326,336,339
+src/songe/sleep/examples.py
+  h_8b0c426ac9a924 23,53-54,56-58
+src/songe/sleep/fuse.py
+  h_8b0c426ac9a924 141-145,171-177,192
+src/songe/sleep/judged.py
+  h_8b0c426ac9a924 8-11,23,159-160
+src/songe/sleep/worker.py
+  h_8b0c426ac9a924 15,17-23,29,142,156-183,185,204,258-268,277-304,409-412,415-417,430-434,436-439,957,1034,1088,1146,1160-1162,1279,1298-1309,1327,1333,1348,1357-1364,1417-1420,1426,1436,1466,1493,1496-1497,1499-1501,1516-1523,1548,1552-1555
+src/songe/terminal.py
+  h_8b0c426ac9a924 3,17-23,120-121,125-142
+src/songe/upstream/vllm.py
+  h_8b0c426ac9a924 41-54,77-78,87
+src/songe/wording.py
+  h_8b0c426ac9a924 7-16,357-358,717-744
+tests/test_agents.py
+  h_8b0c426ac9a924 3,309-337
+tests/test_cli.py
+  h_8b0c426ac9a924 91-146
+tests/test_crossplatform_upstreams.py
+  h_8b0c426ac9a924 1,344-415
+tests/test_data_cycles.py
+  h_8b0c426ac9a924 351-413
+tests/test_dreams_cycle.py
+  h_8b0c426ac9a924 195-200,244-281,584-592
+tests/test_guard_regressions.py
+  h_8b0c426ac9a924 496-542
+tests/test_models.py
+  h_8b0c426ac9a924 1247-1293
+tests/test_nvidia_telemetry.py
+  h_8b0c426ac9a924 12,14-16,22-26,29,33,39-49,97-147
+tests/test_partial_calibration.py
+  h_8b0c426ac9a924 950-997
+tests/test_practice.py
+  h_8b0c426ac9a924 9,30,60-62,107,111-130,162-242
+tests/test_pressure_baseline.py
+  h_8b0c426ac9a924 94,105-107
+tests/test_proxy.py
+  h_8b0c426ac9a924 440-475
+tests/test_quick.py
+  h_8b0c426ac9a924 797-851
+tests/test_reading.py
+  h_8b0c426ac9a924 10,347-348,446,728-775,894-1089
+tests/test_recordings.py
+  h_8b0c426ac9a924 1-334
+tests/test_recordings_limit.py
+  h_8b0c426ac9a924 1-250
+tests/test_review_regressions.py
+  h_8b0c426ac9a924 316-351,737-749
+tests/test_schedule.py
+  h_8b0c426ac9a924 114-206
+tests/test_status_responsive.py
+  h_8b0c426ac9a924 71
+tests/test_store.py
+  h_8b0c426ac9a924 34
+tests/test_torch_backend.py
+  h_8b0c426ac9a924 251-256,262-302,338-377,450-474,485,497,521
+tests/test_training_batches.py
+  h_8b0c426ac9a924 469-594
+tests/test_undersized_scoring.py
+  h_8b0c426ac9a924 55
+tests/test_worker.py
+  h_8b0c426ac9a924 111,211-241,246,249-252,261
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e2ae8794af9954d67c915b375a7718ecd803f307",
+  "prompts": {},
+  "humans": {
+    "h_8b0c426ac9a924": {
+      "author": "Harsha Vardhan <harsha@ansl.ai>"
+    }
+  }
+}
